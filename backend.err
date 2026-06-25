@@ -1,0 +1,17 @@
+Error: listen EADDRINUSE: address already in use :::8000
+    at Server.setupListenHandle [as _listen2] (node:net:2008:16)
+    at listenInCluster (node:net:2065:12)
+    at Server.listen (node:net:2170:7)
+    at app.listen (C:\Users\Administrator\Desktop\TonyCom2\backend-node\node_modules\express\lib\application.js:635:24)
+    at Object.<anonymous> (C:\Users\Administrator\Desktop\TonyCom2\backend-node\src\app.ts:100:5)
+    at Module.<anonymous> (node:internal/modules/cjs/loader:1811:14)
+    at Module._compile (C:\Users\Administrator\Desktop\TonyCom2\backend-node\node_modules\source-map-support\source-map-support.js:568:25)
+    at Module.m._compile (C:\Users\ADMINI~1\AppData\Local\Temp\ts-node-dev-hook-3679751140912333.js:69:33)
+    at node:internal/modules/cjs/loader:1951:10
+    at require.extensions..jsx.require.extensions..js (C:\Users\ADMINI~1\AppData\Local\Temp\ts-node-dev-hook-3679751140912333.js:114:20)
+    at require.extensions.<computed> (C:\Users\ADMINI~1\AppData\Local\Temp\ts-node-dev-hook-3679751140912333.js:71:20)
+    at Object.nodeDevHook [as .ts] (C:\Users\Administrator\Desktop\TonyCom2\backend-node\node_modules\ts-node-dev\lib\hook.js:63:13)
+    at Module.load (node:internal/modules/cjs/loader:1532:32)
+    at Module._load (node:internal/modules/cjs/loader:1334:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.require (node:internal/modules/cjs/loader:1555:12)

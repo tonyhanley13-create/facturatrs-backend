@@ -1,0 +1,308 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id              Int               @id @default(autoincrement()) @map("id")
+  username        String?           @map("nombre_usuario") @db.VarChar(50)
+  email           String            @unique @map("correo_electronico")
+  password        String            @map("clave_acceso")
+  first_name      String?           @map("nombre") @db.VarChar(100)
+  last_name       String?           @map("apellido") @db.VarChar(100)
+  company_name    String?           @map("nombre_empresa") @db.VarChar(255)
+  is_super_admin  Boolean           @default(false) @map("es_super_admin")
+  created_at      DateTime          @default(now()) @map("fecha_creacion")
+  
+  userCompanies   UserCompany[]
+  clients         Client[]
+  companySettings CompanySettings[]
+  invoices        Invoice[]
+  products        ProductService[]
+  analytics       UsageAnalytics[]
+
+  @@map("usuarios")
+}
+
+model Company {
+  id                     Int               @id @default(autoincrement()) @map("id")
+  name                   String            @map("nombre") @db.VarChar(255)
+  rnc                    String            @map("rnc") @db.VarChar(20)
+  address                String?           @map("direccion") @db.Text
+  phone                  String?           @map("telefono") @db.VarChar(20)
+  email                  String?           @map("correo") @db.VarChar(255)
+  logo_url               String?           @map("url_logo") @db.VarChar(500)
+  default_currency       String            @default("DOP") @map("moneda_defecto") @db.VarChar(3)
+  tax_percentage         Decimal           @default(18.00) @map("porcentaje_itbis") @db.Decimal(5, 2)
+  next_invoice_number    Int               @default(1) @map("proximo_numero_factura")
+  invoice_prefix         String            @default("FACT-") @map("prefijo_factura") @db.VarChar(10)
+  ncf_ranges             String?           @map("rangos_ncf") @db.Text
+  alanube_company_id     String?           @map("id_empresa_alanube") @db.VarChar(50)
+  alanube_environment    String            @default("sandbox") @map("ambiente_alanube") @db.VarChar(20)
+  fiscal_provider        String            @default("alanube") @map("proveedor_fiscal") @db.VarChar(20)
+  gae_company_id         String?           @map("id_empresa_gae") @db.VarChar(50)
+  gae_seller_code        String?           @map("codigo_vendedor_gae") @db.VarChar(50)
+  gae_environment        String            @default("Test") @map("ambiente_gae") @db.VarChar(20)
+  dgii_environment       String            @default("Test") @map("ambiente_dgii") @db.VarChar(20)
+  certificate_name       String?           @map("nombre_certificado") @db.VarChar(255)
+  certificate_content    String?           @map("contenido_certificado") @db.Text
+  certificate_password   String?           @map("clave_certificado") @db.VarChar(500)
+  certificate_expiry     DateTime?         @map("vencimiento_certificado")
+  is_template            Boolean           @default(false) @map("es_plantilla")
+  created_at             DateTime          @default(now()) @map("fecha_creacion")
+  updated_at             DateTime          @default(now()) @updatedAt @map("fecha_actualizacion")
+
+  userCompanies          UserCompany[]
+  clients                Client[]          @relation("CompanyToClient")
+  products               ProductService[]  @relation("CompanyToProduct")
+  invoices               Invoice[]         @relation("CompanyToInvoice")
+  accounts               ChartOfAccount[]
+  receivedEcf            ReceivedEcf[]
+  certificationProgress  CertificationProgress?
+
+  @@map("empresas")
+}
+
+model UserCompany {
+  user_id            Int      @map("id_usuario")
+  company_id         Int      @map("id_empresa")
+  role               String   @default("admin") @map("rol") @db.VarChar(50)
+  can_switch_company Boolean  @default(true) @map("puede_cambiar_empresa")
+  created_at         DateTime @default(now()) @map("fecha_creacion")
+
+  user    User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [company_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, company_id])
+  @@map("usuario_empresas")
+}
+
+model ChartOfAccount {
+  id          Int      @id @default(autoincrement()) @map("id")
+  company_id  Int      @map("id_empresa")
+  code        String   @map("codigo") @db.VarChar(50)
+  name        String   @map("nombre") @db.VarChar(255)
+  type        String   @map("tipo") @db.VarChar(50)
+  parent_id   Int?     @map("id_padre")
+  level       Int      @default(1) @map("nivel")
+  is_group    Boolean  @default(false) @map("es_grupo")
+  created_at  DateTime @default(now()) @map("fecha_creacion")
+
+  company     Company  @relation(fields: [company_id], references: [id], onDelete: Cascade)
+  
+  @@map("catalogo_cuentas")
+}
+
+model Client {
+  id             Int       @id @default(autoincrement()) @map("id")
+  user_id        Int       @map("id_usuario")
+  company_id     Int?      @map("id_empresa")
+  name           String    @map("nombre") @db.VarChar(255)
+  rnc            String    @map("rnc_cedula") @db.VarChar(20)
+  phone          String?   @map("telefono") @db.VarChar(20)
+  address        String?   @map("direccion") @db.Text
+  contact_person String?   @map("persona_contacto") @db.VarChar(255)
+  email          String?   @map("correo_electronico") @db.VarChar(255)
+  client_type    String?   @default("individual") @map("tipo_cliente") @db.VarChar(50)
+  tax_id         String?   @map("id_fiscal") @db.VarChar(20)
+  custom_fields  String?   @map("campos_personalizados") @db.Text
+  created_at     DateTime  @default(now()) @map("fecha_creacion")
+  
+  user           User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  company        Company?  @relation("CompanyToClient", fields: [company_id], references: [id])
+  invoices       Invoice[]
+
+  @@map("clientes")
+}
+
+model CompanySettings {
+  id                     Int      @id @default(autoincrement()) @map("id")
+  user_id                Int      @map("id_usuario")
+  company_name           String   @map("nombre_empresa") @db.VarChar(255)
+  company_rnc            String   @map("rnc_empresa") @db.VarChar(20)
+  company_address        String?  @map("direccion_empresa") @db.Text
+  company_phone          String?  @map("telefono_empresa") @db.VarChar(20)
+  company_email          String?  @map("correo_empresa") @db.VarChar(255)
+  company_logo_url       String?  @map("url_logo_empresa") @db.VarChar(500)
+  default_currency       String   @default("DOP") @map("moneda_defecto") @db.VarChar(3)
+  tax_percentage         Decimal  @default(18.00) @map("porcentaje_itbis") @db.Decimal(5, 2)
+  next_invoice_number    Int      @default(1) @map("proximo_numero_factura")
+  invoice_prefix         String   @default("FACT-") @map("prefijo_factura") @db.VarChar(10)
+  alanube_company_id     String?  @map("id_empresa_alanube") @db.VarChar(50)
+  alanube_environment    String   @default("sandbox") @map("ambiente_alanube") @db.VarChar(20)
+  required_client_fields String?  @map("campos_clientes_requeridos") @db.Text
+  client_custom_fields   String?  @map("campos_personalizados_clientes") @db.Text
+  invoice_template       String   @default("default") @map("plantilla_factura") @db.VarChar(50)
+  plan_type              String   @default("starter") @map("tipo_plan") @db.VarChar(20)
+  monthly_invoice_limit  Int      @default(50) @map("limite_facturas_mensual")
+  user_limit             Int      @default(1) @map("limite_usuarios")
+  created_at             DateTime @default(now()) @map("fecha_creacion")
+  updated_at             DateTime @default(now()) @updatedAt @map("fecha_actualizacion")
+  user                   User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("configuracion_empresa")
+}
+
+model Invoice {
+  id              Int           @id @default(autoincrement()) @map("id")
+  user_id         Int           @map("id_usuario")
+  company_id      Int?          @map("id_empresa")
+  client_id       Int           @map("id_cliente")
+  invoice_number  String        @map("numero_factura") @db.VarChar(50)
+  description     String?       @map("descripcion") @db.Text
+  amount          Decimal       @map("monto_bruto") @db.Decimal(18, 2)
+  subtotal        Decimal       @map("subtotal") @db.Decimal(18, 2)
+  tax_amount      Decimal       @map("monto_itbis") @db.Decimal(18, 2)
+  discount_amount Decimal       @default(0.00) @map("monto_descuento") @db.Decimal(18, 2)
+  total_amount    Decimal       @map("monto_total") @db.Decimal(18, 2)
+  currency        String        @default("DOP") @map("moneda") @db.VarChar(3)
+  status          String        @default("draft") @map("estado") @db.VarChar(50)
+  alanube_id      String?       @map("id_alanube") @db.VarChar(100)
+  ncf             String?       @map("ncf") @db.VarChar(50)
+  due_date        DateTime?     @map("fecha_vencimiento") @db.Date
+  payment_status  String        @default("pending") @map("estado_pago") @db.VarChar(20)
+  payment_method  String        @default("01") @map("metodo_pago") @db.VarChar(50)
+  notes           String?       @map("notas") @db.Text
+  custom_fields   String?       @map("campos_personalizados") @db.Text
+  dgii_track_id      String?       @map("id_seguimiento_dgii") @db.VarChar(100)
+  dgii_security_code String?       @map("codigo_seguridad_dgii") @db.VarChar(20)
+  dgii_signed_xml    String?       @map("xml_firmado_dgii") @db.Text
+  dgii_status        String?       @map("estado_dgii") @db.VarChar(20)
+  dgii_contingency   Boolean       @default(false) @map("es_contingencia")
+  dgii_error         String?       @map("error_dgii") @db.Text
+  created_at         DateTime      @default(now()) @map("fecha_creacion")
+  
+  user            User          @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  company         Company?      @relation("CompanyToInvoice", fields: [company_id], references: [id])
+  client          Client        @relation(fields: [client_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  items           InvoiceItem[]
+
+  @@map("facturas")
+}
+
+model InvoiceItem {
+  id                     Int      @id @default(autoincrement()) @map("id")
+  invoice_id             Int      @map("id_factura")
+  line_number            Int      @map("numero_linea")
+  item_code              String?  @map("codigo_item") @db.VarChar(50)
+  item_name              String   @map("nombre_item") @db.VarChar(255)
+  description            String?  @map("descripcion") @db.Text
+  quantity               Decimal  @default(1.000) @map("cantidad") @db.Decimal(10, 3)
+  unit_price             Decimal  @map("precio_unitario") @db.Decimal(18, 2)
+  discount_percentage    Decimal  @default(0.00) @map("porcentaje_descuento") @db.Decimal(5, 2)
+  tax_percentage         Decimal  @default(18.00) @map("porcentaje_itbis") @db.Decimal(5, 2)
+  subtotal               Decimal  @map("subtotal") @db.Decimal(18, 2)
+  tax_amount             Decimal  @map("monto_itbis") @db.Decimal(18, 2)
+  total_amount           Decimal  @map("monto_total") @db.Decimal(18, 2)
+  billing_indicator      Int      @default(1) @map("indicador_facturacion")
+  good_service_indicator Int      @default(2) @map("indicador_bien_servicio")
+  unit_of_measure        String   @default("UND") @map("unidad_medida") @db.VarChar(10)
+  created_at             DateTime @default(now()) @map("fecha_creacion")
+  invoice                Invoice  @relation(fields: [invoice_id], references: [id], onDelete: Cascade)
+
+  @@map("detalle_facturas")
+}
+
+model ProductService {
+  id                     Int      @id @default(autoincrement()) @map("id")
+  user_id                Int      @map("id_usuario")
+  company_id             Int?     @map("id_empresa")
+  code                   String?  @map("codigo") @db.VarChar(50)
+  name                   String   @map("nombre") @db.VarChar(255)
+  description            String?  @map("descripcion") @db.Text
+  category               String?  @map("categoria") @db.VarChar(100)
+  unit_price             Decimal  @map("precio_unitario") @db.Decimal(18, 2)
+  tax_percentage         Decimal  @default(18.00) @map("porcentaje_itbis") @db.Decimal(5, 2)
+  type                   String   @default("service") @map("tipo") @db.VarChar(20)
+  unit_of_measure        String   @default("UND") @map("unidad_medida") @db.VarChar(10)
+  billing_indicator      Int      @default(1) @map("indicador_facturacion")
+  good_service_indicator Int      @default(2) @map("indicador_bien_servicio")
+  is_active              Boolean  @default(true) @map("esta_activo")
+  created_at             DateTime @default(now()) @map("fecha_creacion")
+  updated_at             DateTime @default(now()) @updatedAt @map("fecha_actualizacion")
+  
+  user                   User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  company                Company? @relation("CompanyToProduct", fields: [company_id], references: [id])
+
+  @@map("productos_servicios")
+}
+
+model UsageAnalytics {
+  id                   Int      @id @default(autoincrement()) @map("id")
+  user_id              Int      @map("id_usuario")
+  period_start         DateTime @map("inicio_periodo") @db.Date
+  period_end           DateTime @map("fin_periodo") @db.Date
+  invoices_created     Int      @default(0) @map("facturas_creadas")
+  total_revenue        Decimal  @default(0.00) @map("ingresos_totales") @db.Decimal(18, 2)
+  clients_active       Int      @default(0) @map("clientes_activos")
+  alanube_requests     Int      @default(0) @map("peticiones_alanube")
+  plan_invoice_limit   Int?     @map("limite_facturas_plan")
+  plan_user_limit      Int?     @map("limite_usuarios_plan")
+  created_at           DateTime @default(now()) @map("fecha_creacion")
+  user                 User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("analiticas_uso")
+}
+
+model ReceivedEcf {
+  id             Int      @id @default(autoincrement()) @map("id")
+  company_id     Int      @map("id_empresa")
+  encf           String   @map("encf") @db.VarChar(50)
+  rnc_emisor     String   @map("rnc_emisor") @db.VarChar(20)
+  rnc_comprador  String   @map("rnc_comprador") @db.VarChar(20)
+  monto_total    Decimal  @map("monto_total") @db.Decimal(18, 2)
+  xml_signed     String   @map("xml_firmado") @db.Text
+  status         String   @default("pending") @map("estado") @db.VarChar(20)
+  approval       String?  @map("aprobacion") @db.VarChar(20)
+  raw_response   String?  @map("respuesta_original") @db.Text
+  created_at     DateTime @default(now()) @map("fecha_creacion")
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: Cascade)
+
+  @@map("recibidos_ecf")
+}
+
+model CertificationProgress {
+  id                     Int       @id @default(autoincrement()) @map("id")
+  company_id             Int       @unique @map("id_empresa")
+  current_step           Int       @default(0) @map("paso_actual")
+  status                 String    @default("not_started") @map("estado") @db.VarChar(20)
+  postulation_xml        String?   @map("xml_postulacion") @db.Text
+  postulation_signed_xml String?   @map("xml_postulacion_firmado") @db.Text
+  software_name          String?   @map("nombre_software") @db.VarChar(255)
+  software_version       String?   @map("version_software") @db.VarChar(50)
+  software_type          String?   @map("tipo_software") @db.VarChar(50)
+  provider_name          String?   @map("nombre_proveedor") @db.VarChar(255)
+  provider_contact       String?   @map("contacto_proveedor") @db.VarChar(255)
+  url_recepcion          String?   @map("url_recepcion") @db.VarChar(500)
+  url_aprobacion         String?   @map("url_aprobacion") @db.VarChar(500)
+  url_autenticacion      String?   @map("url_autenticacion") @db.VarChar(500)
+  url_recepcion_prod     String?   @map("url_recepcion_produccion") @db.VarChar(500)
+  url_aprobacion_prod    String?   @map("url_aprobacion_produccion") @db.VarChar(500)
+  url_autenticacion_prod String?   @map("url_autenticacion_produccion") @db.VarChar(500)
+  test_data_sent         Boolean   @default(false) @map("datos_prueba_enviados")
+  test_data_approved     Boolean   @default(false) @map("datos_prueba_aprobados")
+  simulation_sent        Boolean   @default(false) @map("simulacion_enviada")
+  simulation_approved    Boolean   @default(false) @map("simulacion_aprobada")
+  pdf_sent               Boolean   @default(false) @map("pdf_enviado")
+  pdf_approved           Boolean?  @map("pdf_aprobado")
+  communication_ready    Boolean   @default(false) @map("comunicacion_listo")
+  communication_passed   Boolean   @default(false) @map("comunicacion_aprobada")
+  declaration_xml        String?   @map("xml_declaracion") @db.Text
+  declaration_signed_xml String?   @map("xml_declaracion_firmado") @db.Text
+  declaration_submitted  Boolean   @default(false) @map("declaracion_enviada")
+  rnc_verified           Boolean   @default(false) @map("rnc_verificado")
+  cancel_reason          String?   @map("motivo_cancelacion") @db.Text
+  started_at             DateTime? @map("fecha_inicio")
+  completed_at           DateTime? @map("fecha_completado")
+  created_at             DateTime  @default(now()) @map("fecha_creacion")
+  updated_at             DateTime  @default(now()) @updatedAt @map("fecha_actualizacion")
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: Cascade)
+
+  @@map("progreso_certificacion")
+}
