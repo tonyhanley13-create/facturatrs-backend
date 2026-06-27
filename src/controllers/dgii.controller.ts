@@ -3,7 +3,8 @@ import { AuthRequest } from '../middlewares/auth';
 import prisma from '../models/db';
 import * as dgiiService from '../services/dgii.service';
 import { saveInvoiceFile } from '../services/storage.service';
-import { getNcfSequences, saveNcfSequences, getDefaultSequences, buildEncfNumber, getTypeInfo, resolveType } from '../services/alanube.service';
+import { getNextNcfNumber } from '../services/ncf.service';
+import { getTypeInfo, resolveType } from '../services/alanube.service';
 import { generateInvoiceNumber } from './commercial.controller';
 
 export async function testConnection(req: AuthRequest, res: Response) {
@@ -125,10 +126,7 @@ export async function createInvoice(req: AuthRequest, res: Response) {
       },
     });
     const typeInfo = getTypeInfo(document_type);
-    const sequences = await getNcfSequences(req.user.id, req.user.company_id);
-    const resolved = sequences.length > 0 ? sequences : getDefaultSequences();
-    const { encfNumber, updatedSequences } = buildEncfNumber(resolved, typeInfo.prefix);
-    await saveNcfSequences(updatedSequences, req.user.company_id, req.user.id);
+    const encfNumber = await getNextNcfNumber(req.user.company_id, typeInfo.prefix);
     const ecfType = parseInt(encfNumber.substring(1, 3), 10);
     const result = await dgiiService.sendInvoice(
       req.user.company_id, invoice.id, encfNumber, company.rnc, client.rnc, Number(amount), company.dgii_environment,
@@ -202,9 +200,11 @@ export async function createInvoice(req: AuthRequest, res: Response) {
       data: { id: invoice.id, invoice_number: invoiceNumber, ncf: encfNumber, qr_url: qrUrl, track_id: result.trackId, client: client.name, estado: dgiiEstado, mensajes: dgiiMensajes },
     });
   } catch (error: any) {
+    const errMsg = error?.message || (typeof error === 'string' ? error : JSON.stringify(error));
+    console.error('❌ Error en createInvoice:', errMsg);
     return res.status(202).json({
       success: false, contingency: true,
-      message: `DGII no disponible. Factura guardada en contingencia: ${error.message}`,
+      message: `DGII no disponible. Factura guardada en contingencia: ${errMsg}`,
     });
   }
 }
@@ -245,10 +245,7 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
         if (parsed.modification_code) modificationCode = parsed.modification_code;
       }
     } catch (_) { }
-    const sequences = await getNcfSequences(req.user.id, req.user.company_id);
-    const resolved = sequences.length > 0 ? sequences : getDefaultSequences();
-    const { encfNumber, updatedSequences } = buildEncfNumber(resolved, docType);
-    await saveNcfSequences(updatedSequences, req.user.company_id, req.user.id);
+    const encfNumber = await getNextNcfNumber(req.user.company_id, docType);
     const amount = Number(invoice.total_amount);
     const ecfType = parseInt(encfNumber.substring(1, 3), 10);
     const result = await dgiiService.sendInvoice(

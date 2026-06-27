@@ -1,5 +1,7 @@
 import prisma from '../models/db';
 import * as dgiiService from './dgii.service';
+import { getNextNcfNumber } from './ncf.service';
+import { resolveType } from './alanube.service';
 
 export async function sendWithContingency(
   companyId: number,
@@ -130,17 +132,35 @@ export async function resendContingency(companyId: number): Promise<{ sent: numb
     }
 
     try {
+      // Determinar tipo de documento y referencia para asignar NCF correcto
+      let docType = 'E32';
+      let refNcf: string | undefined;
+      let modCode: string | undefined;
+      try {
+        if (inv.custom_fields) {
+          const parsed = JSON.parse(inv.custom_fields);
+          if (parsed.documento_tipo) docType = resolveType(parsed.documento_tipo);
+          if (parsed.reference_ncf) refNcf = parsed.reference_ncf;
+          if (parsed.modification_code) modCode = parsed.modification_code;
+        }
+      } catch (_) {}
+      const encfNumber = await getNextNcfNumber(companyId, docType);
+
       const result = await dgiiService.sendInvoice(
-        companyId, inv.id, inv.ncf || '',
+        companyId, inv.id, encfNumber,
         (inv.company?.rnc || '').replace(/-/g, ''),
         (inv.client?.rnc || '').replace(/-/g, ''),
         Number(inv.total_amount),
         inv.company?.dgii_environment || 'Test',
+        docType,
+        refNcf,
+        modCode,
       );
 
       await prisma.invoice.update({
         where: { id: inv.id },
         data: {
+          ncf: encfNumber,
           dgii_track_id: result.trackId,
           dgii_security_code: result.securityCode,
           dgii_signed_xml: result.signedXml,

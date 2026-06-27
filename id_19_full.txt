@@ -1,0 +1,5 @@
+--- ID 19 FULL DATA ---
+NCF: E340000000032
+Total: 1500
+Subtotal: 1500
+Tax: 0

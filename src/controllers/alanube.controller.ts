@@ -137,7 +137,7 @@ export async function createCompany(req: AuthRequest, res: Response) {
 
 export async function createInvoice(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
-  const { client_id, description, amount, document_type } = req.body;
+  const { client_id, description, amount, document_type, reference_ncf, modification_code } = req.body;
   if (!client_id || !description || amount === undefined) {
     return res.status(400).json({ detail: 'client_id, description y amount son requeridos' });
   }
@@ -153,17 +153,25 @@ export async function createInvoice(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: `El cliente '${client.name}' no tiene un RNC configurado. Es obligatorio para la facturación fiscal.` });
     }
     const invoiceNumber = await generateInvoiceNumber(req.user.id, req.user.company_id);
+    const docType = document_type || 'Factura de Consumo';
     const invoice = await prisma.invoice.create({
       data: {
         user_id: req.user.id, company_id: req.user.company_id, client_id: client.id, invoice_number: invoiceNumber,
         description, amount: Number(amount), subtotal: Number(amount), tax_amount: 0.0, discount_amount: 0.0,
         total_amount: Number(amount), currency: 'DOP', status: 'draft',
-        custom_fields: JSON.stringify({ documento_tipo: document_type || 'Factura de Consumo' }),
+        document_type: docType, reference_ncf: reference_ncf || null,
+        custom_fields: JSON.stringify({ documento_tipo: docType }),
       },
     });
     const alanubeRes = await alanubeService.createAlanubeInvoice({
       client: { name: client.name, rnc: client.rnc, address: client.address || undefined },
-      description, amount: Number(amount), documentType: document_type,
+      description,
+      amount: Number(amount),
+      subtotal: Number(invoice.subtotal),
+      taxAmount: Number(invoice.tax_amount),
+      documentType: docType,
+      referenceNcf: reference_ncf,
+      modificationCode: modification_code,
     }, req.user.id, req.user.company_id);
     const ncf = findEncf(alanubeRes);
     const invoiceId = String(alanubeRes.id || alanubeRes.invoiceId || alanubeRes.documentId || '');
@@ -172,7 +180,7 @@ export async function createInvoice(req: AuthRequest, res: Response) {
     const updatedCustom = { ...currentCustom, ncf_comprobante: ncf, qr_url: findQrUrl(alanubeRes), alanube_response: alanubeRes, alanube_error: !apiSuccess ? alanubeRes.alanube_error : undefined };
     const updatedInvoice = await prisma.invoice.update({
       where: { id: invoice.id },
-      data: { status: apiSuccess ? 'sent_to_alanube' : 'error', alanube_id: invoiceId, ncf, custom_fields: JSON.stringify(updatedCustom) },
+      data: { status: apiSuccess ? 'sent_to_alanube' : 'error', alanube_id: invoiceId, ncf, document_type: docType, reference_ncf: reference_ncf || null, custom_fields: JSON.stringify(updatedCustom) },
     });
     if (!apiSuccess) {
       return res.status(400).json({ success: false, message: `NCF ${ncf} generado pero error al transmitir a Alanube: ${alanubeRes.alanube_error}`, data: { id: updatedInvoice.id, ncf, status: 'error', amount: Number(updatedInvoice.total_amount), client: client.name } });
@@ -204,15 +212,25 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: `El cliente '${client.name}' no tiene un RNC configurado.` });
     }
     let docType = 'Factura de Consumo';
+    let refNcf: string | undefined;
+    let modCode: string | undefined;
     try {
       if (invoice.custom_fields) {
         const parsed = JSON.parse(invoice.custom_fields);
         if (parsed.documento_tipo) docType = parsed.documento_tipo;
+        if (parsed.reference_ncf) refNcf = parsed.reference_ncf;
+        if (parsed.modification_code) modCode = parsed.modification_code;
       }
     } catch (_) { }
     const alanubeRes = await alanubeService.createAlanubeInvoice({
       client: { name: client.name, rnc: client.rnc, address: client.address || undefined },
-      description: invoice.description || 'Factura de venta', amount: Number(invoice.total_amount), documentType: docType,
+      description: invoice.description || 'Factura de venta',
+      amount: Number(invoice.total_amount),
+      subtotal: Number(invoice.subtotal),
+      taxAmount: Number(invoice.tax_amount),
+      documentType: docType,
+      referenceNcf: refNcf || invoice.reference_ncf || undefined,
+      modificationCode: modCode,
     }, req.user.id, req.user.company_id);
     const ncf = findEncf(alanubeRes);
     const alanubeId = String(alanubeRes.id || alanubeRes.invoiceId || alanubeRes.documentId || '');

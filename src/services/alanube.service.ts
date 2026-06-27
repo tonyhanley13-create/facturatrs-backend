@@ -2,6 +2,7 @@ import axios from 'axios';
 import { ALANUBE_API_URL, ALANUBE_TOKEN, ALANUBE_COMPANY_ID } from '../config';
 import crypto from 'crypto';
 import prisma from '../models/db';
+import { getNextNcfNumber } from './ncf.service';
 
 const ALANUBE_API_BASE = ALANUBE_API_URL.endsWith('/') ? ALANUBE_API_URL : `${ALANUBE_API_URL}/`;
 
@@ -25,15 +26,20 @@ const DOCUMENT_TYPE_MAP: Record<string, { prefix: string; typeCode: string; endp
 };
 
 const DOCUMENT_TYPE_ALIASES: Record<string, string> = {
+  'Factura de Credito Fiscal': 'E31',
   'Factura de Crédito Fiscal': 'E31',
   'Factura de Consumo': 'E32',
+  'Nota de Debito': 'E33',
   'Nota de Débito': 'E33',
+  'Nota de Credito': 'E34',
   'Nota de Crédito': 'E34',
   'Comprobante de Compras': 'E41',
   'Gastos Menores': 'E43',
+  'Regimenes Especiales': 'E44',
   'Regímenes Especiales': 'E44',
   'Comprobante Gubernamental': 'E45',
   'Pagos al Exterior': 'E46',
+  'Exportacion': 'E47',
   'Exportación': 'E47',
 };
 
@@ -41,8 +47,8 @@ export function resolveType(documentType?: string): string {
   if (!documentType) return 'E32';
   const alias = DOCUMENT_TYPE_ALIASES[documentType];
   if (alias) return alias;
-  const upper = documentType.toUpperCase();
-  if (DOCUMENT_TYPE_MAP[upper]) return upper;
+  const normalized = documentType.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  if (DOCUMENT_TYPE_MAP[normalized]) return normalized;
   return 'E32';
 }
 
@@ -132,9 +138,12 @@ export function buildEncfNumber(sequences: any[], prefix: string): { encfNumber:
   return { encfNumber, updatedSequences: sequences };
 }
 
-function buildAlanubePayload(client: { name: string; rnc: string; address?: string }, description: string, amount: number, typeInfo: { prefix: string; typeCode: string }, encfNumber: string, alanubeCompanyId: string, senderCompany?: { name: string; rnc: string; address?: string }) {
+function buildAlanubePayload(client: { name: string; rnc: string; address?: string }, description: string, amount: number, typeInfo: { prefix: string; typeCode: string }, encfNumber: string, alanubeCompanyId: string, senderCompany?: { name: string; rnc: string; address?: string }, referenceNcf?: string, modificationCode?: string, fechaNcfOriginal?: string, subtotal?: number, taxAmount?: number) {
   const todayStr = new Date().toISOString().split('T')[0];
-  return {
+  const finalSubtotal = subtotal !== undefined ? Number(subtotal) : Number(amount);
+  const finalTax = taxAmount !== undefined ? Number(taxAmount) : 0.0;
+
+  const payload: any = {
     company: { id: alanubeCompanyId },
     idDoc: {
       id: crypto.randomUUID(),
@@ -174,24 +183,32 @@ function buildAlanubePayload(client: { name: string; rnc: string; address?: stri
         description,
         goodServiceIndicator: 2,
         quantityItem: 1,
-        unitPriceItem: Number(amount),
-        itemAmount: Number(amount),
+        unitPriceItem: finalSubtotal,
+        itemAmount: finalSubtotal,
         quantity: 1,
-        unitPrice: Number(amount),
-        totalAmount: Number(amount),
+        unitPrice: finalSubtotal,
+        totalAmount: finalSubtotal + finalTax,
         itemCode: '001',
         unitOfMeasure: 'UND',
       },
     ],
     totals: {
-      subtotal: Number(amount),
-      tax: 0.0,
+      subtotal: finalSubtotal,
+      tax: finalTax,
       discount: 0.0,
-      totalAmount: Number(amount),
+      totalAmount: finalSubtotal + finalTax,
     },
     documentType: typeInfo.typeCode,
     paymentMethod: '01',
   };
+  if (referenceNcf) {
+    payload.idDoc.NCFModificado = referenceNcf;
+    payload.idDoc.FechaNCFModificado = fechaNcfOriginal || todayStr;
+    if (modificationCode) {
+      payload.idDoc.CodigoModificacion = modificationCode;
+    }
+  }
+  return payload;
 }
 
 // ========== CONNECTION / COMPANY ==========
@@ -232,16 +249,35 @@ export interface AlanubeInvoicePayload {
   client: { name: string; rnc: string; address?: string };
   description: string;
   amount: number;
+  subtotal?: number;
+  taxAmount?: number;
   documentType?: string;
+  referenceNcf?: string;
+  modificationCode?: string;
 }
 
 export async function createAlanubeInvoice(payload: AlanubeInvoicePayload, userId: number, companyId?: number) {
-  const { client, description, amount, documentType } = payload;
+  const { client, description, amount, subtotal, taxAmount, documentType, referenceNcf, modificationCode } = payload;
   const typeInfo = getTypeInfo(documentType);
-  const sequences = await getNcfSequences(userId, companyId);
-  const resolved = sequences.length > 0 ? sequences : getDefaultSequences();
-  const { encfNumber, updatedSequences } = buildEncfNumber(resolved, typeInfo.prefix);
-  await saveNcfSequences(updatedSequences, companyId, userId);
+  if (!companyId) throw new Error('Se requiere company_id para generar NCF');
+  const encfNumber = await getNextNcfNumber(companyId, typeInfo.prefix);
+
+  let fechaNcfOriginal: string | undefined;
+  if (referenceNcf) {
+    try {
+      const orig = await prisma.invoice.findFirst({
+        where: { ncf: referenceNcf, company_id: companyId },
+        select: { created_at: true },
+      });
+      if (orig?.created_at) {
+        const d = orig.created_at;
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        fechaNcfOriginal = `${dd}-${mm}-${yyyy}`;
+      }
+    } catch (_) { }
+  }
 
   const alanubeCompanyId = await getAlanubeCompanyId(companyId);
   let senderCompany: { name: string; rnc: string; address?: string } | undefined;
@@ -249,7 +285,7 @@ export async function createAlanubeInvoice(payload: AlanubeInvoicePayload, userI
     const c = await prisma.company.findUnique({ where: { id: companyId }, select: { name: true, rnc: true, address: true } });
     if (c) senderCompany = { name: c.name, rnc: c.rnc, address: c.address || undefined };
   }
-  const alanubeData = buildAlanubePayload(client, description, amount, typeInfo, encfNumber, alanubeCompanyId, senderCompany);
+  const alanubeData = buildAlanubePayload(client, description, amount, typeInfo, encfNumber, alanubeCompanyId, senderCompany, referenceNcf, modificationCode, fechaNcfOriginal, subtotal, taxAmount);
   // POST to /{endpoint} with company.id in body (not in URL path)
   const url = `${ALANUBE_API_BASE}${typeInfo.endpointPath}`;
 

@@ -2,7 +2,8 @@ import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import prisma from '../models/db';
 import * as gaeService from '../services/gae.service';
-import { getNcfSequences, saveNcfSequences, getDefaultSequences, buildEncfNumber, getTypeInfo, resolveType } from '../services/alanube.service';
+import { getNextNcfNumber } from '../services/ncf.service';
+import { getTypeInfo, resolveType } from '../services/alanube.service';
 import { generateInvoiceNumber } from './commercial.controller';
 
 function findValueByKeys(source: any, keys: string[]): string {
@@ -206,10 +207,7 @@ export async function createInvoice(req: AuthRequest, res: Response) {
     }
 
     // Generar NCF
-    const sequences = await getNcfSequences(req.user.id, req.user.company_id);
-    const resolved = sequences.length > 0 ? sequences : getDefaultSequences();
-    const { encfNumber, updatedSequences } = buildEncfNumber(resolved, getTypeInfo('E32').prefix);
-    await saveNcfSequences(updatedSequences, req.user.company_id, req.user.id);
+    const encfNumber = await getNextNcfNumber(req.user.company_id, getTypeInfo('E32').prefix);
 
     // Buscar o crear cliente por RNC
     let client = await prisma.client.findFirst({
@@ -328,7 +326,7 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
   try {
     const invoice = await prisma.invoice.findFirst({
       where: { id: invoiceId, company_id: req.user.is_super_admin ? undefined : req.user.company_id },
-      include: { client: true },
+      include: { client: true, items: true },
     });
 
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
@@ -362,13 +360,56 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
     } catch (_) { }
 
     // Generar NCF
-    const sequences = await getNcfSequences(req.user.id, req.user.company_id);
-    const resolved = sequences.length > 0 ? sequences : getDefaultSequences();
-    const { encfNumber, updatedSequences } = buildEncfNumber(resolved, docType);
-    await saveNcfSequences(updatedSequences, req.user.company_id, req.user.id);
+    const encfNumber = await getNextNcfNumber(req.user.company_id, docType);
+
+    // Cálculos de montos detallados
+    let totalTaxedAmount = 0;
+    let totalExemptAmount = 0;
+    const gaeItems = (invoice.items || []).map((item, index) => {
+      const subtotal = Number(item.subtotal);
+      const taxRate = Number(item.tax_percentage);
+      const isTaxed = taxRate > 0;
+
+      if (isTaxed) {
+        totalTaxedAmount += subtotal;
+      } else {
+        totalExemptAmount += subtotal;
+      }
+
+      return {
+        lineNumber: index + 1,
+        itemDescription: item.description || item.item_name || 'Artículo',
+        serviceInd: String(item.good_service_indicator || '2'),
+        itemQuantity: Number(item.quantity),
+        unitMeasure: item.unit_of_measure || 'UND',
+        unitPrice: Number(item.unit_price),
+        itemAmount: subtotal,
+        TaxTypes: isTaxed ? 1 : 0, // 1 = ITBIS (18%), 0 = Exento
+      };
+    });
+
+    // Fallback si no hay ítems
+    if (gaeItems.length === 0) {
+      const subtotal = Number(invoice.subtotal);
+      const taxAmount = Number(invoice.tax_amount);
+      if (taxAmount > 0) {
+        totalTaxedAmount = subtotal;
+      } else {
+        totalExemptAmount = subtotal;
+      }
+      gaeItems.push({
+        lineNumber: 1,
+        itemDescription: invoice.description || 'Factura de venta',
+        serviceInd: '2',
+        itemQuantity: 1,
+        unitMeasure: 'UND',
+        unitPrice: subtotal,
+        itemAmount: subtotal,
+        TaxTypes: taxAmount > 0 ? 1 : 0,
+      });
+    }
 
     // Construir payload GAE
-    const amount = Number(invoice.total_amount);
     const gaePayload: any = {
       ecf: encfNumber,
       ecfType: docType,
@@ -379,21 +420,26 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
       buyerBusinessName: client.name,
       buyerAddress: client.address || '',
       issueDate: new Date().toISOString().split('T')[0],
-      InvoiceTotalAmount: amount,
-      TotalTaxedAmount: amount,
+      InvoiceTotalAmount: Number(invoice.total_amount),
+      TotalTaxedAmount: totalTaxedAmount,
       incomeType: '01',
       currencyType: 'DOP',
-      items: [{
-        lineNumber: 1,
-        itemDescription: invoice.description || 'Factura de venta',
-        serviceInd: '2',
-        itemQuantity: 1,
-        unitMeasure: 'UND',
-        unitPrice: amount,
-        itemAmount: amount,
-        TaxTypes: 1,
-      }],
+      items: gaeItems,
     };
+
+    // Agregar TotalExemptAmount si existe monto exento
+    if (totalExemptAmount > 0) {
+      gaePayload.TotalExemptAmount = totalExemptAmount;
+    }
+
+    // Campos específicos para Nota de Crédito (E34)
+    if (docType === 'E34') {
+      gaePayload.creditNoteInd = 1;
+      gaePayload.modifiedNcf = invoice.reference_ncf || '';
+      gaePayload.rncNcfModified = company.rnc;
+      gaePayload.modifDateNcf = new Date().toISOString().split('T')[0]; // Idealmente la fecha de la original
+      gaePayload.modifReasonId = 1; // 1 = Anulación de factura
+    }
 
     const result = await gaeService.createGaeInvoice(gaePayload);
     const ecf = findEcf(result) || encfNumber;
@@ -405,6 +451,7 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
       ncf_comprobante: ecf,
       qr_url: qrUrl || '',
       gae_response: result,
+      reference_nc: invoice.reference_ncf, // Asegurar persistencia de referencia
     };
 
     await prisma.invoice.update({
@@ -425,7 +472,7 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
         ecf,
         qr_url: qrUrl || '',
         client: client.name,
-        amount,
+        amount: Number(invoice.total_amount),
       },
     });
   } catch (error: any) {

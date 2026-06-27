@@ -3,6 +3,7 @@ import prisma from '../models/db';
 import { AuthRequest } from '../middlewares/auth';
 import { Decimal } from '@prisma/client/runtime/library';
 import * as ExcelJS from 'exceljs';
+import { logInvoiceAction } from '../services/audit.service';
 
 // ==========================================
 // HELPER FUNCTIONS FOR LIMITS & LOGS
@@ -512,6 +513,7 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
   const {
     client_id, description, currency, due_date, notes,
     custom_fields, items, discount_amount, flete_amount, otros_amount,
+    document_type, reference_ncf,
   } = req.body;
 
   try {
@@ -584,6 +586,8 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
           currency: currency || 'DOP',
           due_date: due_date ? new Date(due_date) : undefined,
           notes,
+          document_type: document_type || null,
+          reference_ncf: reference_ncf || null,
           custom_fields: custom_fields ? JSON.stringify(custom_fields) : null,
         },
       });
@@ -592,6 +596,7 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
       });
     });
 
+    logInvoiceAction(invoiceId, req.user.id, 'updated', invoice.status, 'draft', 'Factura actualizada');
     return res.status(200).json({ id: invoiceId, message: 'Factura actualizada exitosamente' });
   } catch (error: any) {
     console.error('❌ Error al actualizar factura:', error);
@@ -617,6 +622,7 @@ export async function deleteInvoice(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: 'Solo se pueden eliminar facturas en borrador o con error' });
     }
 
+    logInvoiceAction(invoiceId, req.user.id, 'deleted', invoice.status, undefined, 'Factura eliminada');
     await prisma.invoiceItem.deleteMany({ where: { invoice_id: invoiceId } });
     await prisma.invoice.delete({ where: { id: invoiceId } });
 
@@ -678,6 +684,8 @@ export async function getInvoices(req: AuthRequest, res: Response) {
         status: inv.status,
         created_by: inv.user?.username || '',
         created_at: inv.created_at.toISOString(),
+        document_type: inv.document_type,
+        reference_ncf: inv.reference_ncf,
         ncf: inv.ncf || (function () {
           try {
             if (inv.custom_fields) {
@@ -725,6 +733,9 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     discount_amount,
     flete_amount,
     otros_amount,
+    document_type,
+    reference_ncf,
+    modification_code,
   } = req.body;
 
   if (!client_id || !items || !Array.isArray(items) || items.length === 0) {
@@ -788,16 +799,7 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     const invoiceNumber = await generateInvoiceNumber(userId, companyId);
 
     // Crear factura e items en una sola transacción
-    const newInvoice = await prisma.$transaction(async (tx: {
-      invoice: { create: (arg0: { data: { user_id: number; company_id: number; client_id: any; invoice_number: string; description: any; amount: Decimal; subtotal: Decimal; tax_amount: Decimal; discount_amount: Decimal; total_amount: Decimal; currency: any; status: string; due_date: Date | undefined; notes: any; custom_fields: string | null; }; }) => any; }; invoiceItem: {
-        createMany: (arg0: {
-          data: {
-            invoice_id: any; line_number: number; item_code: any; item_name: any; description: any; quantity: Decimal; unit_price: Decimal; tax_percentage: Decimal; subtotal: Decimal; tax_amount: Decimal; total_amount: Decimal; billing_indicator: any; good_service_indicator: any; // 2=servicio por defecto
-            unit_of_measure: any;
-          }[];
-        }) => any;
-      };
-    }) => {
+    const newInvoice = await prisma.$transaction(async (tx: any) => {
       const inv = await tx.invoice.create({
         data: {
           user_id: userId,
@@ -814,6 +816,8 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
           status: 'draft',
           due_date: due_date ? new Date(due_date) : undefined,
           notes,
+          document_type: document_type || null,
+          reference_ncf: reference_ncf || null,
           custom_fields: custom_fields ? JSON.stringify(custom_fields) : null,
         },
       });
@@ -829,6 +833,7 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     });
 
     await logUsage(userId, 'invoice_created', { revenue: calculatedTotal });
+    logInvoiceAction(newInvoice.id, userId, 'created', undefined, 'draft', `Factura creada por $${calculatedTotal}`);
 
     return res.status(200).json({ id: newInvoice.id, number: newInvoice.invoice_number });
   } catch (error: any) {

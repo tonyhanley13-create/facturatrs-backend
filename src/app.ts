@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { PORT } from './config';
+import { startReconciliationScheduler } from './services/reconciliation.service';
 
 // Importar rutas
 import authRoutes from './routes/auth.routes';
@@ -16,6 +17,8 @@ import dgiiReceptionRoutes from './routes/dgii-reception.routes';
 import dgiiContingencyRoutes from './routes/dgii-contingency.routes';
 import certificacionRoutes from './routes/certificacion.routes';
 import storageRoutes from './routes/storage.routes';
+import dgiiReportRoutes from './routes/dgii-report.routes';
+import purchasesRoutes from './routes/purchases.routes';
 
 const app = express();
 
@@ -64,6 +67,8 @@ app.use('/dgii/contingency', dgiiContingencyRoutes);
 app.use('/certificacion', certificacionRoutes);
 // Rutas de Storage
 app.use('/storage', storageRoutes);
+app.use('/dgii/reports', dgiiReportRoutes);
+app.use('/purchases', purchasesRoutes);
 
 // Endpoint de Salud
 app.get('/health', (req, res) => {
@@ -92,7 +97,7 @@ app.get('/', (req, res) => {
     <body>
         <div class="card">
             <h1>FacturaTRS RD</h1>
-            <p>API REST Backend en Node.js, Express y SQL Server</p>
+            <p>API REST Backend en Node.js, Express y PostgreSQL</p>
             <p>Estado: ✅ FUNCIONANDO</p>
             <p><a href="/health">Verificar Salud</a></p>
         </div>
@@ -109,6 +114,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor Express iniciado en el puerto ${PORT}`);
+  startReconciliationScheduler();
 });
 
 export default app;

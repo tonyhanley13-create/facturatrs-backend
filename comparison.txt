@@ -1,0 +1,22 @@
+{
+  "invoice_19": {
+    "ncf": "E340000000032",
+    "reference_ncf": "E310000000010",
+    "client_name": "VIAMAR  SA",
+    "client_rnc": "101011149",
+    "status": "Aceptado",
+    "mensajes": [
+      {
+        "valor": "",
+        "codigo": 0
+      }
+    ]
+  },
+  "invoice_11": {
+    "ncf": "E320000000025",
+    "client_name": "LEANDRO RAFAEL GONZALEZ MEJIA",
+    "client_rnc": "00100129758",
+    "status": "Aceptado",
+    "mensajes": []
+  }
+}

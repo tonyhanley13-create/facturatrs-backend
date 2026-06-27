@@ -190,8 +190,19 @@ export async function login(req: Request, res: Response) {
       include: { company: true },
     });
 
-    const companyId = userCompany?.company_id || 1;
-    const companyName = userCompany?.company?.name || user.company_name || '';
+    let companyId: number;
+    let companyName = '';
+
+    if (user.is_super_admin && !userCompany) {
+      // Super admin sin empresa específica — puede operar en todas
+      companyId = 0;
+      companyName = 'Super Admin';
+    } else if (!userCompany) {
+      return res.status(400).json({ detail: 'El usuario no tiene empresas asignadas. Contacte al administrador.' });
+    } else {
+      companyId = userCompany.company_id;
+      companyName = userCompany.company?.name || user.company_name || '';
+    }
 
     // Generar token JWT con company_id y rol de super administrador
     const token = jwt.sign(
@@ -242,16 +253,21 @@ export async function verifyToken(req: AuthRequest, res: Response) {
     }
 
     // Usar company_id del token (última empresa seleccionada) si aún pertenece a ella
-    const tokenCompanyId = req.user!.company_id;
-    const stillMember = user.userCompanies.some(uc => uc.company_id === tokenCompanyId);
-    const companyId = stillMember
-      ? tokenCompanyId
-      : user.userCompanies.length > 0
-        ? user.userCompanies[0].company_id
-        : 1;
+    let companyId: number;
+    if (user.is_super_admin && req.user!.company_id === 0) {
+      companyId = 0;
+    } else {
+      const tokenCompanyId = req.user!.company_id;
+      const stillMember = user.userCompanies.some(uc => uc.company_id === tokenCompanyId);
+      companyId = stillMember
+        ? tokenCompanyId
+        : user.userCompanies.length > 0
+          ? user.userCompanies[0].company_id
+          : 1;
+    }
 
     // Obtener nombre de la empresa desde Company model
-    const company = await prisma.company.findUnique({ where: { id: companyId } });
+    const company = companyId === 0 ? null : await prisma.company.findUnique({ where: { id: companyId } });
 
     return res.status(200).json({
       user: {
@@ -277,6 +293,22 @@ export async function listCompanies(req: AuthRequest, res: Response) {
   }
 
   try {
+    if (req.user.is_super_admin) {
+      // Super admin ve todas las empresas
+      const allCompanies = await prisma.company.findMany({
+        orderBy: { name: 'asc' },
+        select: {
+          id: true, name: true, rnc: true, fiscal_provider: true,
+        },
+      });
+      const companies = allCompanies.map((c) => ({
+        id: c.id, name: c.name, rnc: c.rnc, role: 'admin',
+        can_switch_company: true, is_active: c.id === req.user!.company_id,
+        fiscal_provider: c.fiscal_provider,
+      }));
+      return res.status(200).json(companies);
+    }
+
     const userCompanies = await prisma.userCompany.findMany({
       where: { user_id: req.user.id },
       include: { company: true },
@@ -563,19 +595,21 @@ export async function switchCompany(req: AuthRequest, res: Response) {
 
   try {
     // Verificar que el usuario pertenece a esta empresa
-    const userCompany = await prisma.userCompany.findFirst({
-      where: {
-        user_id: req.user.id,
-        company_id: Number(company_id),
-      },
-    });
+    if (!req.user.is_super_admin) {
+      const userCompany = await prisma.userCompany.findFirst({
+        where: {
+          user_id: req.user.id,
+          company_id: Number(company_id),
+        },
+      });
 
-    if (!userCompany) {
-      return res.status(403).json({ detail: 'No tienes acceso a esta empresa' });
-    }
+      if (!userCompany) {
+        return res.status(403).json({ detail: 'No tienes acceso a esta empresa' });
+      }
 
-    if (!userCompany.can_switch_company) {
-      return res.status(403).json({ detail: 'No tienes permiso para cambiar de empresa' });
+      if (!userCompany.can_switch_company) {
+        return res.status(403).json({ detail: 'No tienes permiso para cambiar de empresa' });
+      }
     }
 
     // Obtener datos del usuario y la empresa destino

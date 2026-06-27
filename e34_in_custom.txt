@@ -1,0 +1,17 @@
+[
+  {
+    "id": 19,
+    "ncf_campo": "E340000000032",
+    "ncf_comprobante_custom": "E340000000032",
+    "documento_tipo": "Nota de Crédito",
+    "reference_ncf": "E310000000010",
+    "status_bd": "sent_to_dgii",
+    "dgii_estado": "Aceptado",
+    "dgii_mensajes": [
+      {
+        "valor": "",
+        "codigo": 0
+      }
+    ]
+  }
+]

@@ -67,6 +67,7 @@ export async function sendInvoice(
   const ecf = await authenticate(companyId, environment);
 
   const ecfType = parseInt(encfNumber.substring(1, 3), 10);
+  const isE34 = ecfType === 34;
 
   // E32: Comprobante Fiscal (CF) — uses RFCE structure and sendSummary API
   if (ecfType === 32) {
@@ -95,64 +96,95 @@ export async function sendInvoice(
 
   // 2. Mapear items reales (o crear item sintético si no hay items)
   let dgiiItems: any[];
+  let calculatedTaxedAmount = 0;
+  let calculatedExemptAmount = 0;
+
   if (invoice.items.length > 0) {
     dgiiItems = invoice.items.map((item, index) => {
       const qty = Number(item.quantity) || 1;
       const price = Number(item.unit_price) || 0;
-      const itemTotal = Number(item.total_amount) || (qty * price);
-      const taxAmount = Number(item.tax_amount) || 0;
+      const subtotal = qty * price;
+      const taxRate = Number(item.tax_percentage) || 0;
+      const isItemTaxed = taxRate > 0;
+      const itemTaxAmount = (subtotal * taxRate) / 100;
+
+      if (isItemTaxed) {
+        calculatedTaxedAmount += subtotal;
+      } else {
+        calculatedExemptAmount += subtotal;
+      }
 
       return {
         NumeroLinea: (index + 1).toString(),
-        IndicadorFacturacion: taxAmount > 0 ? 1 : 4,
+        IndicadorFacturacion: isItemTaxed ? 1 : 4, // 1 = Gravado, 4 = Exento
         NombreItem: (item.item_name || item.description || 'Producto/Servicio').substring(0, 80),
         IndicadorBienoServicio: Number(item.good_service_indicator) || 1,
         CantidadItem: qty,
         PrecioUnitarioItem: price,
-        MontoItem: itemTotal - taxAmount,
+        MontoItem: subtotal,
       };
     });
   } else {
+    const subtotal = Number(invoice.subtotal);
+    const hasTaxAmount = Number(invoice.tax_amount) > 0;
+    if (hasTaxAmount) {
+      calculatedTaxedAmount = subtotal;
+    } else {
+      calculatedExemptAmount = subtotal;
+    }
+
     dgiiItems = [{
       NumeroLinea: '1',
-      IndicadorFacturacion: 1,
+      IndicadorFacturacion: hasTaxAmount ? 1 : 4,
       NombreItem: (invoice.description || 'Servicio').substring(0, 80),
       IndicadorBienoServicio: 2,
       CantidadItem: 1,
-      PrecioUnitarioItem: montoTotal,
-      MontoItem: montoTotal,
+      PrecioUnitarioItem: subtotal,
+      MontoItem: subtotal,
     }];
   }
 
   // 3. Construir payload completo
-  const hasTax = Number(invoice.tax_amount) > 0;
-  const totales = hasTax
-    ? {
-        MontoGravadoTotal: Number(invoice.subtotal),
-        MontoGravadoI1: Number(invoice.subtotal),
-        ITBIS1: 18,
-        TotalITBIS: Number(invoice.tax_amount),
-        TotalITBIS1: Number(invoice.tax_amount),
-        MontoTotal: Number(invoice.total_amount),
-      }
-    : {
-        MontoExento: Number(invoice.total_amount),
-        MontoTotal: Number(invoice.total_amount),
-      };
+  const taxTotal = Number(invoice.tax_amount);
+
+  // Construir objeto Totales respetando el orden del esquema e-CF
+  const totales: any = {};
+  if (calculatedTaxedAmount > 0) {
+    totales.MontoGravadoTotal = calculatedTaxedAmount;
+    totales.MontoGravadoI1 = calculatedTaxedAmount;
+  }
+
+  if (calculatedExemptAmount > 0) {
+    totales.MontoExento = calculatedExemptAmount;
+  }
+
+  if (taxTotal > 0) {
+    totales.ITBIS1 = 18; // Tasa
+    totales.TotalITBIS = taxTotal;
+    totales.TotalITBIS1 = taxTotal;
+  }
+
+  totales.MontoTotal = Number(invoice.total_amount);
 
   const idDoc: any = {
     TipoeCF: ecfType,
     eNCF: encfNumber,
   };
 
-  if (ecfType === 34) {
+  if (isE34) {
     idDoc.IndicadorNotaCredito = '0';
   }
-
-  idDoc.FechaVencimientoSecuencia = '31-12-2028';
-  idDoc.IndicadorEnvioDiferido = 1;
+  const hasTax = taxTotal > 0;
+  // Basado en ID 19 (E34 aceptada), usaba IndicadorMontoGravado: 1
+  idDoc.IndicadorMontoGravado = (hasTax || isE34) ? 1 : 2; // 1 = Gravado/Mixto, 2 = Exento
+  if (!isE34) {
+    idDoc.IndicadorEnvioDiferido = 1;
+  }
   idDoc.TipoIngresos = '01';
-  idDoc.TipoPago = ecfType === 34 ? 2 : 1;
+  idDoc.TipoPago = isE34 ? 2 : 1;
+  if (isE34) {
+    idDoc.FechaLimitePago = formatDgiiDate(new Date(Date.now() + 30 * 86400000));
+  }
   idDoc.TotalPaginas = 1;
 
   const ecfBody: any = {
@@ -182,20 +214,33 @@ export async function sendInvoice(
       PaginaNo: 1,
       NoLineaDesde: 1,
       NoLineaHasta: totalItems,
-      SubtotalMontoGravadoPagina: hasTax ? Number(invoice.subtotal) : 0,
-      SubtotalMontoGravado1Pagina: hasTax ? Number(invoice.subtotal) : 0,
-      SubtotalExentoPagina: hasTax ? 0 : Number(invoice.total_amount),
-      SubtotalItbisPagina: Number(invoice.tax_amount),
-      SubtotalItbis1Pagina: Number(invoice.tax_amount),
+      SubtotalMontoGravadoPagina: calculatedTaxedAmount,
+      SubtotalMontoGravado1Pagina: calculatedTaxedAmount,
+      SubtotalExentoPagina: calculatedExemptAmount,
+      SubtotalItbisPagina: taxTotal,
+      SubtotalItbis1Pagina: taxTotal,
       MontoSubtotalPagina: Number(invoice.total_amount),
       SubtotalMontoNoFacturablePagina: 0,
     },
   };
 
   if ((ecfType === 33 || ecfType === 34) && referenceNcf) {
+    let fechaOriginal = todayStr;
+    try {
+      const orig = await prisma.invoice.findFirst({
+        where: { ncf: referenceNcf, company_id: companyId },
+        select: { dgii_signed_xml: true },
+      });
+      if (orig?.dgii_signed_xml) {
+        const match = orig.dgii_signed_xml.match(/<FechaEmision>(\d{2}-\d{2}-\d{4})<\/FechaEmision>/);
+        if (match) {
+          fechaOriginal = match[1];
+        }
+      }
+    } catch (_) { }
     ecfBody.InformacionReferencia = {
       NCFModificado: referenceNcf,
-      FechaNCFModificado: todayStr,
+      FechaNCFModificado: fechaOriginal,
       CodigoModificacion: modificationCode || '3',
     };
   }
@@ -208,7 +253,7 @@ export async function sendInvoice(
   const xml = transformer.json2xml(invoicePayload);
 
   console.log('=== GENERATED XML (before sign) ===');
-  console.log(xml);
+  console.log(xml.substring(0, 2000));
 
   const certs = await loadCertificate(companyId);
   const signature = new Signature(certs.key, certs.cert);
@@ -297,14 +342,14 @@ export async function sendSummaryInvoice(
         Totales: {
           ...(hasTax
             ? {
-                MontoGravadoTotal: Number(invoice.subtotal),
-                MontoGravadoI1: Number(invoice.subtotal),
-                TotalITBIS: Number(invoice.tax_amount),
-                TotalITBIS1: Number(invoice.tax_amount),
-              }
+              MontoGravadoTotal: Number(invoice.subtotal),
+              MontoGravadoI1: Number(invoice.subtotal),
+              TotalITBIS: Number(invoice.tax_amount),
+              TotalITBIS1: Number(invoice.tax_amount),
+            }
             : {
-                MontoExento: Number(invoice.total_amount),
-              }),
+              MontoExento: Number(invoice.total_amount),
+            }),
           MontoTotal: Number(invoice.total_amount),
           MontoNoFacturable: 0,
           MontoPeriodo: Number(invoice.total_amount),

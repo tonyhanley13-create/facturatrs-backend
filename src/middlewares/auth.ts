@@ -37,10 +37,15 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
       is_super_admin?: boolean;
     };
     
+    if (decoded.company_id === undefined || decoded.company_id === null) {
+      res.status(401).json({ detail: 'Token sin empresa asignada. Inicie sesión nuevamente.' });
+      return;
+    }
+
     req.user = {
       id: decoded.user_id,
       email: decoded.email,
-      company_id: decoded.company_id ?? 1,
+      company_id: decoded.company_id,
       is_super_admin: decoded.is_super_admin ?? false,
     };
     

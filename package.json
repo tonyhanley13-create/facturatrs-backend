@@ -1,14 +1,28 @@
 {
   "name": "facturapro-backend-node",
   "version": "1.0.0",
-  "description": "Backend de FacturaTRS RD en Node.js, Express, TypeScript y SQL Server",
+  "description": "Backend de FacturaTRS RD en Node.js, Express, TypeScript y PostgreSQL",
   "main": "dist/app.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/app.js",
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma db push"
+    "prisma:migrate": "prisma db push",
+    "test": "jest"
+  },
+  "jest": {
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
+    "testMatch": [
+      "**/*.test.ts"
+    ],
+    "moduleFileExtensions": [
+      "ts",
+      "js",
+      "json"
+    ]
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1073.0",
@@ -29,12 +43,15 @@
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
+    "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.5",
     "@types/mssql": "^12.3.0",
     "@types/multer": "^2.1.0",
     "@types/node": "^20.11.24",
     "@types/pdfkit": "^0.17.6",
+    "jest": "^30.4.2",
     "prisma": "^5.10.0",
+    "ts-jest": "^29.4.11",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.3.3"
   }

@@ -1,0 +1,22 @@
+[
+  {
+    "id": 19,
+    "ncf": "E340000000032",
+    "status": "sent_to_dgii",
+    "client": "VIAMAR  SA",
+    "client_rnc": "101011149",
+    "dgii_estado": "Aceptado",
+    "dgii_error": [],
+    "reference_ncf": "E310000000010"
+  },
+  {
+    "id": 21,
+    "ncf": "E340000000035",
+    "status": "sent_to_dgii",
+    "client": "POLYPLAS DOMINICANA S A",
+    "client_rnc": "101016132",
+    "dgii_estado": "Aceptado",
+    "dgii_error": [],
+    "reference_ncf": "E310000000009"
+  }
+]
