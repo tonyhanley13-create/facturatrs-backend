@@ -166,9 +166,25 @@ export async function sendInvoice(
 
   totales.MontoTotal = Number(invoice.total_amount);
 
+  let sequenceExpirationDate = '31-12-2028';
+  if (company.ncf_ranges) {
+    try {
+      const ranges = JSON.parse(company.ncf_ranges);
+      if (Array.isArray(ranges)) {
+        const range = ranges.find((r: any) => r.type === `E${ecfType}` || r.prefix === `E${ecfType}`);
+        if (range && range.expirationDate) {
+          sequenceExpirationDate = range.expirationDate;
+        }
+      }
+    } catch (e) {
+      console.error('Error parsing company.ncf_ranges:', e);
+    }
+  }
+
   const idDoc: any = {
     TipoeCF: ecfType,
     eNCF: encfNumber,
+    FechaVencimientoSecuencia: sequenceExpirationDate,
   };
 
   if (isE34) {
@@ -177,9 +193,6 @@ export async function sendInvoice(
   const hasTax = taxTotal > 0;
   // Basado en ID 19 (E34 aceptada), usaba IndicadorMontoGravado: 1
   idDoc.IndicadorMontoGravado = (hasTax || isE34) ? 1 : 2; // 1 = Gravado/Mixto, 2 = Exento
-  if (!isE34) {
-    idDoc.IndicadorEnvioDiferido = 1;
-  }
   idDoc.TipoIngresos = '01';
   idDoc.TipoPago = isE34 ? 2 : 1;
   if (isE34) {
@@ -456,28 +469,32 @@ export function generateQR(
   securityCode: string,
   environment: string,
 ): string {
-  const env = getEnv(environment);
+  const isProd = environment === 'Production';
+  const isCert = environment === 'Certification';
+
+  const formattedMonto = Number(montoTotal) % 1 === 0 
+    ? Number(montoTotal).toString() 
+    : Number(montoTotal).toFixed(2);
 
   if (ecfType === 32) {
-    return generateFcQRCodeURL(
-      rncEmisor.replace(/-/g, ''),
-      encf,
-      montoTotal,
-      securityCode,
-      env,
-    );
+    const base = isProd 
+      ? 'https://fc.dgii.gov.do/FC/ConsultaTimbre' 
+      : isCert 
+        ? 'https://fc.dgii.gov.do/CertFC/ConsultaTimbre' 
+        : 'https://fc.dgii.gov.do/TestFC/ConsultaTimbre';
+    
+    return `${base}?rncemisor=${rncEmisor.replace(/-/g, '')}&encf=${encf}&montototal=${formattedMonto}&codigoseguridad=${securityCode}`;
   }
 
-  return generateEcfQRCodeURL(
-    rncEmisor.replace(/-/g, ''),
-    rncComprador ? rncComprador.replace(/-/g, '') : '',
-    encf,
-    montoTotal.toFixed(2),
-    fechaEmision,
-    fechaFirma,
-    securityCode,
-    env,
-  );
+  const base = isProd 
+    ? 'https://ecf.dgii.gov.do/eCF/ConsultaTimbre' 
+    : isCert 
+      ? 'https://ecf.dgii.gov.do/CerteCF/ConsultaTimbre' 
+      : 'https://ecf.dgii.gov.do/TesteCF/ConsultaTimbre';
+
+  const compradorParam = rncComprador ? `RncComprador=${rncComprador.replace(/-/g, '')}&` : '';
+  
+  return `${base}?rncemisor=${rncEmisor.replace(/-/g, '')}&${compradorParam}encf=${encf}&fechaemision=${fechaEmision}&montototal=${formattedMonto}&fechafirma=${encodeURIComponent(fechaFirma)}&codigoseguridad=${securityCode}`;
 }
 
 export async function authenticateOnly(companyId: number, environment?: string): Promise<{ success: boolean; message: string; token?: string }> {

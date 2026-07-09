@@ -1,4 +1,6 @@
 import prisma from '../models/db';
+import { loadCertificate } from './dgii.service';
+import { Signature } from 'dgii-ecf';
 
 export interface PostulationData {
   software_name: string;
@@ -209,12 +211,32 @@ export async function generateDeclarationXml(company_id: number) {
     '</DeclaracionJurada>',
   ].join('\n');
 
+  let signedXml: string | null = null;
+  let submitted = false;
+  try {
+    const certs = await loadCertificate(company_id);
+    const signature = new Signature(certs.key, certs.cert);
+    signedXml = signature.signXml(declarationXml);
+    submitted = true;
+  } catch (e: any) {
+    console.warn('No se pudo firmar automáticamente la Declaración Jurada:', e.message);
+  }
+
   await prisma.certificationProgress.update({
     where: { company_id },
-    data: { declaration_xml: declarationXml },
+    data: {
+      declaration_xml: declarationXml,
+      declaration_signed_xml: signedXml,
+      declaration_submitted: submitted,
+      current_step: submitted ? 14 : progress.current_step,
+    },
   });
 
-  return declarationXml;
+  return {
+    declaration_xml: declarationXml,
+    declaration_signed_xml: signedXml,
+    submitted,
+  };
 }
 
 export function generatePostulationXml(company: any, data: PostulationData): string {
@@ -234,6 +256,44 @@ export function generatePostulationXml(company: any, data: PostulationData): str
     data.url_autenticacion ? `  <URLAutenticacion>${data.url_autenticacion}</URLAutenticacion>` : '',
     '</PostulacionEmisorElectronico>',
   ].filter(Boolean).join('\n');
+}
+
+export async function createAndSignPostulationXml(company_id: number, data: PostulationData) {
+  const company = await prisma.company.findUnique({ where: { id: company_id } });
+  if (!company) throw new Error('Empresa no encontrada');
+
+  const xml = generatePostulationXml(company, data);
+
+  let signedXml: string | null = null;
+  try {
+    const certs = await loadCertificate(company_id);
+    const signature = new Signature(certs.key, certs.cert);
+    signedXml = signature.signXml(xml);
+  } catch (e: any) {
+    console.warn('No se pudo firmar automáticamente la postulación:', e.message);
+  }
+
+  await prisma.certificationProgress.update({
+    where: { company_id },
+    data: {
+      postulation_xml: xml,
+      postulation_signed_xml: signedXml,
+      software_name: data.software_name,
+      software_version: data.software_version,
+      software_type: data.software_type,
+      provider_name: data.provider_name,
+      provider_contact: data.provider_contact,
+      url_recepcion: data.url_recepcion,
+      url_aprobacion: data.url_aprobacion,
+      url_autenticacion: data.url_autenticacion,
+    },
+  });
+
+  return {
+    postulation_xml: xml,
+    postulation_signed_xml: signedXml,
+    signed: !!signedXml,
+  };
 }
 
 export async function getCompanyStatus(company_id: number) {

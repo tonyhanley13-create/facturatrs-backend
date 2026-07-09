@@ -24,6 +24,9 @@ router.post('/submit-declaration', authenticateToken, certController.submitDecla
 // Paso 14: Verificación RNC
 router.post('/verify-rnc', authenticateToken, certController.verifyRnc);
 
+// Paso 5: Transmitir lote de prueba
+router.post('/transmit-test-ecfs', authenticateToken, certController.transmitTestEcfs);
+
 // Paso 15: Completar certificación
 router.post('/complete', authenticateToken, certController.completeCertification);
 

@@ -96,7 +96,7 @@ export async function register(req: Request, res: Response) {
         data: {
           user_id: newUser.id,
           company_id: company!.id,
-          role: company_id ? 'user' : 'admin',
+          role: company_id ? 'cajero' : 'admin',
         },
       });
 
@@ -115,6 +115,11 @@ export async function register(req: Request, res: Response) {
       SECRET_KEY,
       { expiresIn: '365d' }
     );
+
+    await prisma.user.update({
+      where: { id: result.newUser.id },
+      data: { session_token: token },
+    });
 
     return res.status(200).json({
       access_token: token,
@@ -217,6 +222,11 @@ export async function login(req: Request, res: Response) {
       { expiresIn: '365d' }
     );
 
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { session_token: token },
+    });
+
     return res.status(200).json({
       access_token: token,
       token_type: 'bearer',
@@ -252,10 +262,11 @@ export async function verifyToken(req: AuthRequest, res: Response) {
       return res.status(401).json({ detail: 'Usuario no encontrado' });
     }
 
-    // Usar company_id del token (última empresa seleccionada) si aún pertenece a ella
+    // Usar company_id del token (última empresa seleccionada)
     let companyId: number;
-    if (user.is_super_admin && req.user!.company_id === 0) {
-      companyId = 0;
+    if (user.is_super_admin) {
+      // Super admin confía en el company_id del token (0 = todas, >0 = empresa específica)
+      companyId = req.user!.company_id;
     } else {
       const tokenCompanyId = req.user!.company_id;
       const stillMember = user.userCompanies.some(uc => uc.company_id === tokenCompanyId);
@@ -305,6 +316,7 @@ export async function listCompanies(req: AuthRequest, res: Response) {
         id: c.id, name: c.name, rnc: c.rnc, role: 'admin',
         can_switch_company: true, is_active: c.id === req.user!.company_id,
         fiscal_provider: c.fiscal_provider,
+        permissions: null,
       }));
       return res.status(200).json(companies);
     }
@@ -323,6 +335,7 @@ export async function listCompanies(req: AuthRequest, res: Response) {
       can_switch_company: uc.can_switch_company,
       is_active: uc.company_id === req.user!.company_id,
       fiscal_provider: uc.company.fiscal_provider,
+      permissions: uc.permissions,
     }));
 
     return res.status(200).json(companies);
@@ -594,20 +607,47 @@ export async function switchCompany(req: AuthRequest, res: Response) {
   }
 
   try {
-    // Verificar que el usuario pertenece a esta empresa
-    if (!req.user.is_super_admin) {
-      const userCompany = await prisma.userCompany.findFirst({
-        where: {
-          user_id: req.user.id,
-          company_id: Number(company_id),
+    const targetCompanyId = Number(company_id);
+
+    // Super admin puede cambiar a company_id=0 para ver todas las empresas
+    if (req.user.is_super_admin && targetCompanyId === 0) {
+      const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+      if (!user) return res.status(404).json({ detail: 'Usuario no encontrado' });
+
+      const token = jwt.sign(
+        { user_id: user.id, username: user.username, email: user.email, company_id: 0, is_super_admin: true },
+        SECRET_KEY,
+        { expiresIn: '365d' }
+      );
+
+      return res.status(200).json({
+        access_token: token,
+        token_type: 'bearer',
+        user: {
+          id: user.id, username: user.username, email: user.email,
+          first_name: user.first_name, last_name: user.last_name,
+          company_name: 'Todas las Empresas',
+          company_id: 0, is_super_admin: true,
         },
       });
+    }
 
-      if (!userCompany) {
+    // Verificar que el usuario pertenece a esta empresa
+    if (!req.user.is_super_admin) {
+      const targetUserCompany = await prisma.userCompany.findFirst({
+        where: { user_id: req.user.id, company_id: targetCompanyId },
+      });
+
+      if (!targetUserCompany) {
         return res.status(403).json({ detail: 'No tienes acceso a esta empresa' });
       }
 
-      if (!userCompany.can_switch_company) {
+      // Verificar si tiene permiso de salida (cambio de empresa) desde la empresa activa actual
+      const currentUserCompany = await prisma.userCompany.findFirst({
+        where: { user_id: req.user.id, company_id: req.user.company_id },
+      });
+
+      if (currentUserCompany && !currentUserCompany.can_switch_company) {
         return res.status(403).json({ detail: 'No tienes permiso para cambiar de empresa' });
       }
     }
@@ -615,7 +655,7 @@ export async function switchCompany(req: AuthRequest, res: Response) {
     // Obtener datos del usuario y la empresa destino
     const [user, company] = await Promise.all([
       prisma.user.findUnique({ where: { id: req.user.id } }),
-      prisma.company.findUnique({ where: { id: Number(company_id) } }),
+      prisma.company.findUnique({ where: { id: targetCompanyId } }),
     ]);
 
     if (!user || !company) {
@@ -628,12 +668,17 @@ export async function switchCompany(req: AuthRequest, res: Response) {
         user_id: user.id,
         username: user.username,
         email: user.email,
-        company_id: Number(company_id),
+        company_id: targetCompanyId,
         is_super_admin: user.is_super_admin,
       },
       SECRET_KEY,
       { expiresIn: '365d' }
     );
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { session_token: token },
+    });
 
     return res.status(200).json({
       access_token: token,
@@ -645,7 +690,7 @@ export async function switchCompany(req: AuthRequest, res: Response) {
         first_name: user.first_name,
         last_name: user.last_name,
         company_name: company.name,
-        company_id: Number(company_id),
+        company_id: targetCompanyId,
         is_super_admin: user.is_super_admin,
       },
     });

@@ -3,16 +3,24 @@ import bcrypt from 'bcryptjs';
 import prisma from '../models/db';
 import { AuthRequest } from '../middlewares/auth';
 
-/** Verifica que el usuario tenga rol admin en la empresa especificada */
+/** Verifica que el usuario tenga rol admin en la empresa especificada (o sea super admin) */
 async function requireAdminRole(userId: number, companyId: number): Promise<boolean> {
+  // Super admin tiene acceso total
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { is_super_admin: true } });
+  if (user?.is_super_admin) return true;
   const record = await prisma.userCompany.findFirst({
     where: { user_id: userId, company_id: companyId, role: 'admin' },
   });
   return record !== null;
 }
 
-/** Verifica que un usuario esté vinculado a la empresa especificada */
-async function verifyUserInCompany(targetUserId: number, companyId: number): Promise<boolean> {
+/** Verifica que un usuario esté vinculado a la empresa especificada (super admin siempre pasa) */
+async function verifyUserInCompany(targetUserId: number, companyId: number, requestingUserId?: number): Promise<boolean> {
+  // Si quien hace la solicitud es super admin, permitir
+  if (requestingUserId) {
+    const user = await prisma.user.findUnique({ where: { id: requestingUserId }, select: { is_super_admin: true } });
+    if (user?.is_super_admin) return true;
+  }
   const record = await prisma.userCompany.findFirst({
     where: { user_id: targetUserId, company_id: companyId },
   });
@@ -98,7 +106,7 @@ export async function getUsers(req: AuthRequest, res: Response) {
   try {
     // Obtener usuarios que pertenecen a la misma empresa, incluyendo todas sus empresas
     const userCompanies = await prisma.userCompany.findMany({
-      where: { company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { company_id: req.user.company_id || undefined },
       include: {
         user: {
           select: {
@@ -120,6 +128,16 @@ export async function getUsers(req: AuthRequest, res: Response) {
       orderBy: { user: { created_at: 'desc' } },
     });
 
+    // Obtener empresas del usuario solicitante para filtrar
+    const requesterCompanies = req.user.is_super_admin
+      ? null
+      : new Set(
+          (await prisma.userCompany.findMany({
+            where: { user_id: req.user.id },
+            select: { company_id: true },
+          })).map(uc => uc.company_id)
+        );
+
     // Mapear para incluir la lista de empresas de cada usuario
     const seen = new Map<number, any>();
     for (const uc of userCompanies) {
@@ -132,13 +150,16 @@ export async function getUsers(req: AuthRequest, res: Response) {
           last_name: uc.user.last_name,
           company_name: uc.user.company_name,
           created_at: uc.user.created_at,
-          companies: uc.user.userCompanies.map((uc2) => ({
-            id: uc2.company.id,
-            name: uc2.company.name,
-            rnc: uc2.company.rnc,
-            role: uc2.role,
-            can_switch_company: uc2.can_switch_company,
-          })),
+          companies: uc.user.userCompanies
+            .filter((uc2) => !requesterCompanies || requesterCompanies.has(uc2.company.id))
+            .map((uc2) => ({
+              id: uc2.company.id,
+              name: uc2.company.name,
+              rnc: uc2.company.rnc,
+              role: uc2.role,
+              can_switch_company: uc2.can_switch_company,
+              permissions: uc2.permissions,
+            })),
         });
       }
     }
@@ -155,7 +176,7 @@ export async function createUser(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { username, email, password, first_name, last_name, company_name, company_id, role } = req.body;
+  const { username, email, password, first_name, last_name, company_name, company_id, role, permissions } = req.body;
 
   if (!username || !email || !password || !first_name) {
     return res.status(400).json({ detail: 'Usuario, email, contraseña y nombre son requeridos' });
@@ -174,7 +195,7 @@ export async function createUser(req: AuthRequest, res: Response) {
   }
 
   // Validar rol
-  const validRoles = ['admin', 'user'];
+  const validRoles = ['admin', 'supervisor', 'cajero', 'user'];
   const userRole = role && validRoles.includes(role) ? role : 'user';
 
   try {
@@ -192,13 +213,41 @@ export async function createUser(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: 'El correo electrónico ya está registrado' });
     }
 
-    // Validar company_id si se proporcionó
-    const targetCompanyId = company_id || req.user.company_id;
-    if (company_id) {
-      const companyExists = await prisma.company.findUnique({ where: { id: company_id } });
+    // Determinar y validar las empresas destino
+    const hasCompanyIds = req.body.company_ids && Array.isArray(req.body.company_ids) && req.body.company_ids.length > 0;
+    const bodyCompanyId = company_id ?? req.user.company_id;
+
+    if ((bodyCompanyId === undefined || bodyCompanyId === null) && !hasCompanyIds) {
+      return res.status(400).json({ detail: 'Debe especificar una empresa (company_id o company_ids)' });
+    }
+
+    let companyIds: number[];
+    if (hasCompanyIds) {
+      for (const cid of req.body.company_ids) {
+        if (typeof cid !== 'number' || cid <= 0) {
+          return res.status(400).json({ detail: `ID de empresa inválido: ${cid}` });
+        }
+        const companyExists = await prisma.company.findUnique({ where: { id: cid } });
+        if (!companyExists) {
+          return res.status(400).json({ detail: `La empresa con id ${cid} no existe` });
+        }
+      }
+      companyIds = req.body.company_ids;
+    } else if (bodyCompanyId === 0 && req.user.is_super_admin) {
+      // Super admin sin empresa específica → asignar a todas las empresas
+      const allCompanies = await prisma.company.findMany({ select: { id: true } });
+      if (allCompanies.length === 0) {
+        return res.status(400).json({ detail: 'No hay empresas disponibles' });
+      }
+      companyIds = allCompanies.map(c => c.id);
+    } else if (bodyCompanyId > 0) {
+      const companyExists = await prisma.company.findUnique({ where: { id: bodyCompanyId } });
       if (!companyExists) {
         return res.status(400).json({ detail: 'La empresa especificada no existe' });
       }
+      companyIds = [bodyCompanyId];
+    } else {
+      return res.status(400).json({ detail: 'ID de empresa inválido' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -216,21 +265,20 @@ export async function createUser(req: AuthRequest, res: Response) {
         },
       });
 
-      // Vincular el nuevo usuario a la(s) empresa(s) seleccionada(s)
-      const companyIds = req.body.company_ids && Array.isArray(req.body.company_ids) && req.body.company_ids.length > 0
-        ? req.body.company_ids
-        : [targetCompanyId];
-
       const canSwitchMap: Record<number, boolean> = {};
       if (req.body.company_can_switch && typeof req.body.company_can_switch === 'object') {
-        Object.assign(canSwitchMap, req.body.company_can_switch);
+        for (const [k, v] of Object.entries(req.body.company_can_switch)) {
+          canSwitchMap[parseInt(k, 10)] = !!v;
+        }
       }
+      const permissionsJson = Array.isArray(permissions) && permissions.length > 0 ? JSON.stringify(permissions) : null;
       for (const cid of companyIds) {
         await tx.userCompany.create({
           data: {
             user_id: newUser.id,
             company_id: cid,
             role: userRole,
+            permissions: permissionsJson,
             can_switch_company: canSwitchMap[cid] !== undefined ? canSwitchMap[cid] : true,
           },
         });
@@ -244,11 +292,12 @@ export async function createUser(req: AuthRequest, res: Response) {
       username: result.username,
       email: result.email,
       first_name: result.first_name,
-      message: `Usuario creado y vinculado a la(s) empresa(s)`,
+      message: `Usuario creado y vinculado a ${companyIds.length} empresa(s)`,
     });
   } catch (error: any) {
     console.error('❌ Error al crear usuario:', error);
-    return res.status(500).json({ detail: 'Error al crear usuario' });
+    const detail = error?.message || 'Error al crear usuario';
+    return res.status(500).json({ detail });
   }
 }
 
@@ -267,11 +316,11 @@ export async function updateUser(req: AuthRequest, res: Response) {
       return res.status(403).json({ detail: 'Solo los administradores pueden actualizar usuarios' });
     }
 
-    if (!(await verifyUserInCompany(targetId, req.user.company_id))) {
+    if (!(await verifyUserInCompany(targetId, req.user.company_id, req.user.id))) {
       return res.status(404).json({ detail: 'Usuario no encontrado en esta empresa' });
     }
 
-    const { username, email, first_name, last_name, company_name, company_ids, role, password } = req.body;
+    const { username, email, first_name, last_name, company_name, company_ids, role, password, permissions } = req.body;
 
     if (!username || !email || !first_name) {
       return res.status(400).json({ detail: 'Usuario, email y nombre son requeridos' });
@@ -305,7 +354,9 @@ export async function updateUser(req: AuthRequest, res: Response) {
           const isAdminInCompany = await tx.userCompany.findFirst({
             where: { user_id: currentUserId, company_id: cid, role: 'admin' },
           });
-          if (!isAdminInCompany) {
+          // Super admin no necesita UserCompany record
+          const currentUser = await tx.user.findUnique({ where: { id: currentUserId }, select: { is_super_admin: true } });
+          if (!isAdminInCompany && !currentUser?.is_super_admin) {
             throw new Error(`No tienes permisos de administrador en la empresa ${cid}`);
           }
         }
@@ -315,9 +366,12 @@ export async function updateUser(req: AuthRequest, res: Response) {
 
         // Crear nuevos vínculos
         const userRole = role || 'user';
+        const permissionsJson = Array.isArray(permissions) && permissions.length > 0 ? JSON.stringify(permissions) : null;
         const canSwitchMap: Record<number, boolean> = {};
         if (req.body.company_can_switch && typeof req.body.company_can_switch === 'object') {
-          Object.assign(canSwitchMap, req.body.company_can_switch);
+          for (const [k, v] of Object.entries(req.body.company_can_switch)) {
+            canSwitchMap[parseInt(k, 10)] = !!v;
+          }
         }
         for (const cid of company_ids) {
           await tx.userCompany.create({
@@ -325,6 +379,7 @@ export async function updateUser(req: AuthRequest, res: Response) {
               user_id: targetId,
               company_id: cid,
               role: userRole,
+              permissions: permissionsJson,
               can_switch_company: canSwitchMap[cid] !== undefined ? canSwitchMap[cid] : true,
             },
           });
@@ -333,6 +388,45 @@ export async function updateUser(req: AuthRequest, res: Response) {
         // Actualizar el company_name con la primera empresa
         const firstCompany = await tx.company.findUnique({ where: { id: company_ids[0] } });
         data.company_name = firstCompany?.name || company_name || 'TRS Client';
+      } else if (permissions !== undefined || role !== undefined || req.body.company_can_switch !== undefined) {
+        // Actualizar permisos/rol/switch sin cambiar la vinculación de empresas
+        const updateData: any = {};
+        if (role !== undefined) updateData.role = role;
+        if (permissions !== undefined) {
+          updateData.permissions = Array.isArray(permissions) && permissions.length > 0
+            ? JSON.stringify(permissions)
+            : null;
+        }
+        // Si es super admin, actualizar en todas las empresas del usuario
+        // Si no, solo en la empresa actual del admin
+        const currentUser = await tx.user.findUnique({ where: { id: req.user!.id }, select: { is_super_admin: true } });
+        const whereClause: any = { user_id: targetId };
+        if (!currentUser?.is_super_admin) {
+          whereClause.company_id = req.user!.company_id;
+        }
+        
+        if (Object.keys(updateData).length > 0) {
+          await tx.userCompany.updateMany({
+            where: whereClause,
+            data: updateData,
+          });
+        }
+
+        // Si se envió el mapa de cambio de empresa, actualizarlo
+        if (req.body.company_can_switch && typeof req.body.company_can_switch === 'object') {
+          for (const [cidStr, canSwitch] of Object.entries(req.body.company_can_switch)) {
+            const cid = parseInt(cidStr, 10);
+            if (!isNaN(cid)) {
+              // Asegurar que el admin tiene derecho a editar esta empresa (o es super admin)
+              if (currentUser?.is_super_admin || cid === req.user!.company_id) {
+                await tx.userCompany.updateMany({
+                  where: { user_id: targetId, company_id: cid },
+                  data: { can_switch_company: !!canSwitch },
+                });
+              }
+            }
+          }
+        }
       }
 
       return tx.user.update({
@@ -367,7 +461,7 @@ export async function deleteUser(req: AuthRequest, res: Response) {
       return res.status(403).json({ detail: 'Solo los administradores pueden eliminar usuarios' });
     }
 
-    if (!(await verifyUserInCompany(targetId, req.user.company_id))) {
+    if (!(await verifyUserInCompany(targetId, req.user.company_id, req.user.id))) {
       return res.status(404).json({ detail: 'Usuario no encontrado en esta empresa' });
     }
 

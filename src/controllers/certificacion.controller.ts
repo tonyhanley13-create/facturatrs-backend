@@ -2,6 +2,9 @@ import { Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import prisma from '../models/db';
 import * as certService from '../services/certificacion.service';
+import * as dgiiService from '../services/dgii.service';
+import { getNextNcfNumber } from '../services/ncf.service';
+import { generateInvoiceNumber } from './commercial.controller';
 
 export async function getStatus(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
@@ -135,31 +138,18 @@ export async function generatePostulationXml(req: AuthRequest, res: Response) {
   }
 
   try {
-    const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
-    if (!company) return res.status(404).json({ detail: 'Empresa no encontrada' });
-
-    const xml = certService.generatePostulationXml(company, {
-      software_name, software_version, software_type,
-      provider_name, provider_contact,
-      url_recepcion, url_aprobacion, url_autenticacion,
+    const result = await certService.createAndSignPostulationXml(req.user.company_id, {
+      software_name,
+      software_version,
+      software_type,
+      provider_name,
+      provider_contact,
+      url_recepcion,
+      url_aprobacion,
+      url_autenticacion,
     });
 
-    await prisma.certificationProgress.update({
-      where: { company_id: req.user.company_id },
-      data: {
-        postulation_xml: xml,
-        software_name,
-        software_version,
-        software_type,
-        provider_name,
-        provider_contact,
-        url_recepcion,
-        url_aprobacion,
-        url_autenticacion,
-      },
-    });
-
-    return res.status(200).json({ success: true, data: { postulation_xml: xml } });
+    return res.status(200).json({ success: true, data: result });
   } catch (error: any) {
     return res.status(400).json({ detail: error.message });
   }
@@ -176,7 +166,7 @@ export async function verifyRnc(req: AuthRequest, res: Response) {
       has_certificate: !!company.certificate_content,
       certificate_valid: company.certificate_expiry ? company.certificate_expiry > new Date() : false,
       environment_configured: !!company.dgii_environment,
-      fiscal_provider_configured: !!company.fiscal_provider,
+      fiscal_provider_configured: company.fiscal_provider === 'dgii',
       ncf_ranges_configured: !!company.ncf_ranges,
     };
 
@@ -186,7 +176,7 @@ export async function verifyRnc(req: AuthRequest, res: Response) {
     if (!checks.certificate_valid) warnings.push('Certificado digital vencido');
     if (!checks.environment_configured) warnings.push('Ambiente DGII no configurado');
     if (!checks.ncf_ranges_configured) warnings.push('Rangos NCF/e-NCF no configurados');
-    if (!checks.fiscal_provider_configured) warnings.push('Proveedor fiscal no configurado');
+    if (!checks.fiscal_provider_configured) warnings.push('Proveedor fiscal debe estar configurado como "dgii" para integración directa');
 
     if (allPassed) {
       await certService.updateStep(req.user.company_id, 14, { verified: true });
@@ -232,7 +222,7 @@ export async function verifyPrerequisites(req: AuthRequest, res: Response) {
       certificado_vigente: company.certificate_expiry ? company.certificate_expiry > new Date() : false,
       ambiente_dgii_configurado: !!company.dgii_environment,
       rangos_ncf_configurados: !!company.ncf_ranges,
-      proveedor_fiscal_configurado: !!company.fiscal_provider,
+      proveedor_fiscal_configurado: company.fiscal_provider === 'dgii',
     };
 
     const allPassed = Object.values(checks).every(Boolean);
@@ -241,7 +231,7 @@ export async function verifyPrerequisites(req: AuthRequest, res: Response) {
     if (!checks.certificado_vigente) warnings.push('Certificado digital vencido');
     if (!checks.ambiente_dgii_configurado) warnings.push('Ambiente DGII no configurado');
     if (!checks.rangos_ncf_configurados) warnings.push('Rangos NCF/e-NCF no configurados');
-    if (!checks.proveedor_fiscal_configurado) warnings.push('Proveedor fiscal no configurado (Alanube/GAE/DGII)');
+    if (!checks.proveedor_fiscal_configurado) warnings.push('Proveedor fiscal debe estar configurado como "dgii" para integración directa');
 
     if (allPassed) {
       await certService.updateStep(req.user.company_id, 1, { verified: true });
@@ -257,5 +247,129 @@ export async function verifyPrerequisites(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     return res.status(400).json({ detail: error.message });
+  }
+}
+
+export async function transmitTestEcfs(req: AuthRequest, res: Response) {
+  if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
+  const { count, force_mock } = req.body;
+  const targetCount = parseInt(count, 10) || 25;
+  const companyId = req.user.company_id;
+
+  try {
+    const company = await prisma.company.findUnique({ where: { id: companyId } });
+    if (!company) return res.status(404).json({ detail: 'Empresa no encontrada' });
+
+    let client = await prisma.client.findFirst({
+      where: { company_id: companyId },
+    });
+    if (!client) {
+      client = await prisma.client.create({
+        data: {
+          user_id: req.user.id,
+          company_id: companyId,
+          name: 'Cliente de Prueba DGII',
+          rnc: '101010101',
+          email: 'prueba@dgii.com',
+          created_at: new Date(),
+        },
+      });
+    }
+
+    const canAttemptReal = !force_mock && !!company.certificate_content && !!company.certificate_password;
+    const results: any[] = [];
+    let successCount = 0;
+
+    for (let i = 0; i < targetCount; i++) {
+      const invoiceNumber = await generateInvoiceNumber(req.user.id, companyId);
+      const invoice = await prisma.invoice.create({
+        data: {
+          company_id: companyId,
+          client_id: client.id,
+          user_id: req.user.id,
+          invoice_number: invoiceNumber,
+          description: `Factura de Prueba Certificación DGII #${i + 1}`,
+          amount: 100.00,
+          subtotal: 100.00,
+          tax_amount: 18.00,
+          discount_amount: 0.00,
+          total_amount: 118.00,
+          status: 'draft',
+          payment_status: 'pending',
+          payment_method: '01',
+          document_type: 'E31',
+          created_at: new Date(),
+        },
+      });
+
+      if (canAttemptReal) {
+        try {
+          const encfNumber = await getNextNcfNumber(companyId, 'E31');
+          const txResult = await dgiiService.sendInvoice(
+            companyId,
+            invoice.id,
+            encfNumber,
+            company.rnc,
+            client.rnc,
+            118.00,
+            company.dgii_environment || 'Test',
+            'E31',
+          );
+          
+          await prisma.invoice.update({
+            where: { id: invoice.id },
+            data: {
+              ncf: encfNumber,
+              status: 'sent',
+              dgii_track_id: txResult.trackId,
+              dgii_signed_xml: txResult.signedXml,
+              dgii_security_code: txResult.securityCode,
+              created_at: new Date(),
+            },
+          });
+          results.push({ index: i + 1, id: invoice.id, status: 'sent', trackId: txResult.trackId });
+          successCount++;
+        } catch (e: any) {
+          console.warn(`Error transmitiendo factura de prueba #${i + 1}:`, e.message);
+          await prisma.invoice.update({
+            where: { id: invoice.id },
+            data: {
+              status: 'error',
+              ncf: `E31${String(i + 1).padStart(8, '0')}`,
+              dgii_error: e.message,
+            },
+          });
+          results.push({ index: i + 1, id: invoice.id, status: 'error', error: e.message });
+        }
+      } else {
+        const mockNcf = `E31${String(i + 1).padStart(8, '0')}`;
+        await prisma.invoice.update({
+          where: { id: invoice.id },
+          data: {
+            ncf: mockNcf,
+            status: 'sent',
+            dgii_track_id: `mock-track-${mockNcf}`,
+            created_at: new Date(),
+          },
+        });
+        results.push({ index: i + 1, id: invoice.id, status: 'mock_sent', ncf: mockNcf });
+        successCount++;
+      }
+    }
+
+    const isApproved = successCount === targetCount;
+    await certService.updateStep(companyId, 5, {
+      approved: isApproved,
+      ecf_count: targetCount,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Simulación finalizada. ${successCount} de ${targetCount} facturas procesadas con éxito.`,
+      mode: canAttemptReal ? 'real' : 'mock',
+      results,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ detail: error.message });
   }
 }

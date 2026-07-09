@@ -5,7 +5,7 @@ import { authenticateToken, requireSuperAdmin } from '../middlewares/auth';
 const router = Router();
 
 router.get('/', authenticateToken, getUsers);
-router.post('/', authenticateToken, requireSuperAdmin, createUser);
+router.post('/', authenticateToken, createUser);
 router.get('/me', authenticateToken, getMe);
 router.put('/me/password', authenticateToken, updatePassword);
 router.put('/:id', authenticateToken, updateUser);

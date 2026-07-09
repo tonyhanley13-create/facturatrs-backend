@@ -7,8 +7,6 @@ import { startReconciliationScheduler } from './services/reconciliation.service'
 import authRoutes from './routes/auth.routes';
 import usersRoutes from './routes/users.routes';
 import clientsRoutes from './routes/clients.routes';
-import alanubeRoutes from './routes/alanube.routes';
-import gaeRoutes from './routes/gae.routes';
 import dgiiRoutes from './routes/dgii.routes';
 import commercialRoutes from './routes/commercial.routes';
 import invoicesRoutes from './routes/invoices.routes';
@@ -19,6 +17,7 @@ import certificacionRoutes from './routes/certificacion.routes';
 import storageRoutes from './routes/storage.routes';
 import dgiiReportRoutes from './routes/dgii-report.routes';
 import purchasesRoutes from './routes/purchases.routes';
+import consultaRoutes from './routes/consulta.routes';
 
 const app = express();
 
@@ -49,10 +48,6 @@ app.use((req, res, next) => {
 app.use('/auth', authRoutes);
 app.use('/users', usersRoutes);
 app.use('/clients', clientsRoutes);
-// Rutas de Alanube
-app.use('/alanube', alanubeRoutes);
-// Rutas de GAE
-app.use('/gae', gaeRoutes);
 // Rutas de DGII
 app.use('/dgii', dgiiRoutes);
 // Rutas comerciales extendidas
@@ -69,6 +64,7 @@ app.use('/certificacion', certificacionRoutes);
 app.use('/storage', storageRoutes);
 app.use('/dgii/reports', dgiiReportRoutes);
 app.use('/purchases', purchasesRoutes);
+app.use('/consulta', consultaRoutes);
 
 // Endpoint de Salud
 app.get('/health', (req, res) => {

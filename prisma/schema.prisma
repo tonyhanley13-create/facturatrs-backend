@@ -5,6 +5,7 @@ datasource db {
 
 generator client {
   provider = "prisma-client-js"
+  binaryTargets = ["native", "darwin"]
 }
 
 model User {
@@ -16,6 +17,7 @@ model User {
   last_name       String?           @map("apellido") @db.VarChar(100)
   company_name    String?           @map("nombre_empresa") @db.VarChar(255)
   is_super_admin  Boolean           @default(false) @map("es_super_admin")
+  session_token   String?           @map("token_sesion") @db.VarChar(500)
   created_at      DateTime          @default(now()) @map("fecha_creacion")
   
   userCompanies   UserCompany[]
@@ -52,6 +54,8 @@ model Company {
   certificate_content    String?           @map("contenido_certificado") @db.Text
   certificate_password   String?           @map("clave_certificado") @db.VarChar(500)
   certificate_expiry     DateTime?         @map("vencimiento_certificado")
+  invoicing_mode         String            @default("electronica") @map("modalidad_facturacion") @db.VarChar(20)
+  electronic_start_date  DateTime?         @map("fecha_inicio_electronica") @db.Date
   is_template            Boolean           @default(false) @map("es_plantilla")
   created_at             DateTime          @default(now()) @map("fecha_creacion")
   updated_at             DateTime          @default(now()) @updatedAt @map("fecha_actualizacion")
@@ -75,6 +79,7 @@ model UserCompany {
   company_id         Int      @map("id_empresa")
   role               String   @default("admin") @map("rol") @db.VarChar(50)
   can_switch_company Boolean  @default(true) @map("puede_cambiar_empresa")
+  permissions        String?  @map("permisos") @db.Text
   created_at         DateTime @default(now()) @map("fecha_creacion")
 
   user    User    @relation(fields: [user_id], references: [id], onDelete: Cascade)

@@ -3,8 +3,7 @@ import { AuthRequest } from '../middlewares/auth';
 import prisma from '../models/db';
 import * as dgiiService from '../services/dgii.service';
 import { saveInvoiceFile } from '../services/storage.service';
-import { getNextNcfNumber } from '../services/ncf.service';
-import { getTypeInfo, resolveType } from '../services/alanube.service';
+import { getNextNcfNumber, TRADITIONAL_TYPES, getTypeInfo, resolveType, NCF_PREFIXES } from '../services/ncf.service';
 import { generateInvoiceNumber } from './commercial.controller';
 
 export async function testConnection(req: AuthRequest, res: Response) {
@@ -100,21 +99,26 @@ export async function createInvoice(req: AuthRequest, res: Response) {
   if (Number(amount) <= 0) {
     return res.status(400).json({ detail: 'El monto de la factura debe ser mayor a cero' });
   }
+  let invoice: any = null;
+  let encfNumber = '';
   try {
     const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
     if (!company) return res.status(404).json({ detail: 'Empresa no encontrada' });
     if (!company.certificate_content) {
       return res.status(400).json({ detail: 'Certificado DGII no configurado. Configure el certificado primero.' });
     }
+    if (company.invoicing_mode === 'tradicional') {
+      return res.status(400).json({ detail: 'Los comprobantes tradicionales (B01-B04) no se transmiten a la DGII. Solo se almacenan e imprimen.' });
+    }
     const client = await prisma.client.findFirst({
-      where: { id: Number(client_id), company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: Number(client_id), company_id: req.user.company_id || undefined },
     });
     if (!client) return res.status(404).json({ detail: 'Cliente no encontrado' });
     if (!client.rnc || client.rnc.trim() === '') {
       return res.status(400).json({ detail: `El cliente '${client.name}' no tiene RNC configurado.` });
     }
     const invoiceNumber = await generateInvoiceNumber(req.user.id, req.user.company_id);
-    const invoice = await prisma.invoice.create({
+    invoice = await prisma.invoice.create({
       data: {
         user_id: req.user.id, company_id: req.user.company_id, client_id: client.id, invoice_number: invoiceNumber,
         description, amount: Number(amount), subtotal: Number(amount), tax_amount: 0.0, discount_amount: 0.0,
@@ -126,14 +130,14 @@ export async function createInvoice(req: AuthRequest, res: Response) {
       },
     });
     const typeInfo = getTypeInfo(document_type);
-    const encfNumber = await getNextNcfNumber(req.user.company_id, typeInfo.prefix);
+    encfNumber = await getNextNcfNumber(req.user.company_id, typeInfo.prefix);
     const ecfType = parseInt(encfNumber.substring(1, 3), 10);
     const result = await dgiiService.sendInvoice(
       req.user.company_id, invoice.id, encfNumber, company.rnc, client.rnc, Number(amount), company.dgii_environment,
       typeInfo.prefix, reference_ncf, modification_code,
     );
     // Guardar archivos (local + cloud)
-    saveInvoiceFile(req.user.company_id, invoice.id, 'signed_xml', result.signedXml).catch(() => {});
+    saveInvoiceFile(req.user.company_id, invoice.id, 'signed_xml', result.signedXml).catch(() => { });
     const todayStr = result.firmaFecha.substring(0, 10);
     const qrUrl = dgiiService.generateQR(
       ecfType,
@@ -158,7 +162,7 @@ export async function createInvoice(req: AuthRequest, res: Response) {
         dgiiEstado = statusResult?.estado || dgiiEstado;
         dgiiCodigo = statusResult?.codigo || dgiiCodigo;
         dgiiMensajes = statusResult?.mensajes || dgiiMensajes;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     const currentCustom = JSON.parse(invoice.custom_fields || '{}');
@@ -200,11 +204,30 @@ export async function createInvoice(req: AuthRequest, res: Response) {
       data: { id: invoice.id, invoice_number: invoiceNumber, ncf: encfNumber, qr_url: qrUrl, track_id: result.trackId, client: client.name, estado: dgiiEstado, mensajes: dgiiMensajes },
     });
   } catch (error: any) {
+    // Guardar NCF aunque la transmisión haya fallado
+    if (encfNumber && invoice) {
+      try {
+        const currentCustom = JSON.parse(invoice.custom_fields || '{}');
+        currentCustom.ncf_comprobante = encfNumber;
+        await prisma.invoice.update({
+          where: { id: invoice.id },
+          data: {
+            ncf: encfNumber,
+            dgii_status: 'contingency',
+            dgii_contingency: true,
+            dgii_error: error?.message || 'Error de transmisión',
+            custom_fields: JSON.stringify(currentCustom),
+          },
+        });
+      } catch (_) { }
+    }
     const errMsg = error?.message || (typeof error === 'string' ? error : JSON.stringify(error));
     console.error('❌ Error en createInvoice:', errMsg);
     return res.status(202).json({
-      success: false, contingency: true,
-      message: `DGII no disponible. Factura guardada en contingencia: ${errMsg}`,
+      success: false, contingency: true, ncf: encfNumber || null,
+      message: encfNumber
+        ? `DGII no disponible. Factura guardada en contingencia con NCF ${encfNumber}: ${errMsg}`
+        : `DGII no disponible. Factura guardada en contingencia: ${errMsg}`,
     });
   }
 }
@@ -213,22 +236,26 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
   const invoiceId = parseInt(req.params.invoice_id, 10);
   if (isNaN(invoiceId)) return res.status(400).json({ detail: 'ID de factura inválido' });
+  let encfNumber = '';
   try {
     const invoice = await prisma.invoice.findFirst({
-      where: { id: invoiceId, company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: invoiceId, company_id: req.user.company_id || undefined },
       include: { client: true },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
     if (Number(invoice.total_amount) <= 0) {
       return res.status(400).json({ detail: 'No se puede transmitir una factura con monto cero o negativo' });
     }
-    if (invoice.ncf) {
-      return res.status(400).json({ detail: 'Esta factura ya fue emitida. NCF: ' + invoice.ncf });
-    }
     const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
     if (!company) return res.status(404).json({ detail: 'Empresa no encontrada' });
     if (!company.certificate_content) {
       return res.status(400).json({ detail: 'Certificado DGII no configurado.' });
+    }
+    if (company.invoicing_mode === 'tradicional') {
+      return res.status(400).json({ detail: 'Los comprobantes tradicionales (B01-B04) no se transmiten a la DGII. Solo se almacenan e imprimen.' });
+    }
+    if (invoice.status !== 'draft' && invoice.status !== 'error') {
+      return res.status(400).json({ detail: 'Esta factura ya fue emitida. NCF: ' + invoice.ncf });
     }
     const client = invoice.client;
     if (!client.rnc || client.rnc.trim() === '') {
@@ -240,12 +267,26 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
     try {
       if (invoice.custom_fields) {
         const parsed = JSON.parse(invoice.custom_fields);
-        if (parsed.documento_tipo) docType = resolveType(parsed.documento_tipo);
+        if (parsed.documento_tipo) {
+          // En modalidad transicion, detectar comprobantes tradicionales por el nombre del documento
+          if (company.invoicing_mode === 'transicion') {
+            const tradDocTypes = ['Factura de Crédito Fiscal', 'Factura de Consumo', 'Nota de Débito', 'Nota de Crédito'];
+            if (tradDocTypes.includes(parsed.documento_tipo)) {
+              return res.status(400).json({ detail: 'Los comprobantes tradicionales (B01-B04) no se transmiten a la DGII. Solo se almacenan e imprimen.' });
+            }
+          }
+          docType = resolveType(parsed.documento_tipo);
+        }
         if (parsed.reference_ncf) referenceNcf = parsed.reference_ncf;
         if (parsed.modification_code) modificationCode = parsed.modification_code;
       }
     } catch (_) { }
-    const encfNumber = await getNextNcfNumber(req.user.company_id, docType);
+    const prefix = NCF_PREFIXES[docType];
+    if (invoice.ncf && invoice.ncf.startsWith(prefix)) {
+      encfNumber = invoice.ncf;
+    } else {
+      encfNumber = await getNextNcfNumber(req.user.company_id, docType);
+    }
     const amount = Number(invoice.total_amount);
     const ecfType = parseInt(encfNumber.substring(1, 3), 10);
     const result = await dgiiService.sendInvoice(
@@ -253,7 +294,7 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
       docType, referenceNcf, modificationCode,
     );
     // Guardar archivos (local + cloud)
-    saveInvoiceFile(req.user.company_id, invoice.id, 'signed_xml', result.signedXml).catch(() => {});
+    saveInvoiceFile(req.user.company_id, invoice.id, 'signed_xml', result.signedXml).catch(() => { });
     const todayStr = result.firmaFecha.substring(0, 10);
     const qrUrl = dgiiService.generateQR(
       ecfType,
@@ -278,7 +319,7 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
         dgiiEstado = statusResult?.estado || dgiiEstado;
         dgiiCodigo = statusResult?.codigo || dgiiCodigo;
         dgiiMensajes = statusResult?.mensajes || dgiiMensajes;
-      } catch (_) {}
+      } catch (_) { }
     }
 
     const currentCustom = JSON.parse(invoice.custom_fields || '{}');
@@ -320,20 +361,28 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
       data: { id: invoice.id, invoice_number: invoice.invoice_number, ncf: encfNumber, qr_url: qrUrl, track_id: result.trackId, client: client.name, estado: dgiiEstado, mensajes: dgiiMensajes },
     });
   } catch (error: any) {
-    // Guardar en contingencia
+    console.error('❌ Error en transmitInvoice:', error);
+    // Guardar en contingencia con el NCF ya generado
     try {
+      const updateData: any = {
+        dgii_status: 'contingency',
+        dgii_contingency: true,
+        dgii_error: error.message,
+      };
+      if (encfNumber) {
+        updateData.ncf = encfNumber;
+      }
       await prisma.invoice.update({
         where: { id: invoiceId },
-        data: {
-          dgii_status: 'contingency',
-          dgii_contingency: true,
-          dgii_error: error.message,
-        },
+        data: updateData,
       });
-    } catch (_) {}
+    } catch (_) { }
+    const msg = encfNumber
+      ? `DGII no disponible. Factura guardada en contingencia con NCF ${encfNumber}: ${error.message}`
+      : `DGII no disponible. Factura guardada en contingencia: ${error.message}`;
     return res.status(202).json({
-      success: false, contingency: true,
-      message: `DGII no disponible. Factura guardada en contingencia: ${error.message}`,
+      success: false, contingency: true, ncf: encfNumber || null,
+      message: msg,
     });
   }
 }
@@ -346,6 +395,32 @@ export async function getStatus(req: AuthRequest, res: Response) {
     const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
     const result = await dgiiService.checkStatus(track_id, req.user.company_id, company?.dgii_environment);
     console.log(`[DGII Status] TrackID: ${track_id}, Result:`, JSON.stringify(result, null, 2));
+
+    // Actualizar estado en la base de datos local
+    const isApproved = result?.estado === 'Aceptado';
+    const isRejected = result?.estado === 'Rechazado';
+    const isPending = result?.estado === 'Pendiente' || result?.estado === 'AceptadoParcial';
+
+    if (isApproved || isRejected || isPending) {
+      const finalStatus = isApproved ? 'sent_to_dgii' : isPending ? 'sent_to_dgii' : 'rejected_by_dgii';
+      const finalDgiiStatus = isApproved ? 'sent' : isPending ? 'pending' : 'rejected';
+      
+      const invoice = await prisma.invoice.findFirst({
+        where: { dgii_track_id: track_id },
+      });
+
+      if (invoice) {
+        await prisma.invoice.update({
+          where: { id: invoice.id },
+          data: {
+            status: finalStatus,
+            dgii_status: finalDgiiStatus,
+            dgii_error: isRejected ? JSON.stringify(result.mensajes) : null,
+          },
+        });
+      }
+    }
+
     return res.status(200).json({ success: true, data: result });
   } catch (error: any) {
     return res.status(500).json({ detail: `Error al consultar estado: ${error.message}` });
@@ -400,9 +475,11 @@ export async function resetInvoice(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
   const invoiceId = parseInt(req.params.invoice_id, 10);
   if (isNaN(invoiceId)) return res.status(400).json({ detail: 'ID inválido' });
+  const { keep_ncf } = req.body;
+  const shouldKeepNcf = keep_ncf === true || keep_ncf === 'true';
   try {
     const invoice = await prisma.invoice.findFirst({
-      where: { id: invoiceId, company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: invoiceId, company_id: req.user.company_id || undefined },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
 
@@ -411,22 +488,36 @@ export async function resetInvoice(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: 'Esta factura fue aceptada por DGII. No se puede resetear.' });
     }
 
+    const currentCustom = JSON.parse(invoice.custom_fields || '{}');
+    delete currentCustom.ncf_comprobante;
+    delete currentCustom.qr_url;
+    delete currentCustom.security_code;
+    delete currentCustom.track_id;
+    delete currentCustom.signed_xml;
+    delete currentCustom.dgii_response;
+    const newCustomFields = Object.keys(currentCustom).length > 0 ? JSON.stringify(currentCustom) : null;
+
     await prisma.invoice.update({
       where: { id: invoiceId },
       data: {
         status: 'draft',
-        ncf: null,
+        ncf: shouldKeepNcf ? invoice.ncf : null,
         dgii_track_id: null,
         dgii_security_code: null,
         dgii_signed_xml: null,
         dgii_status: null,
         dgii_contingency: false,
         dgii_error: null,
-        custom_fields: null,
+        custom_fields: newCustomFields,
       },
     });
 
-    return res.status(200).json({ success: true, message: 'Factura reseteada a borrador. Puedes cambiar el tipo y reintentar.' });
+    return res.status(200).json({
+      success: true,
+      message: shouldKeepNcf
+        ? 'Factura reseteada a borrador. Se conservó el NCF para reintentar.'
+        : 'Factura reseteada a borrador. Se asignará un nuevo NCF en el siguiente intento.',
+    });
   } catch (error: any) {
     return res.status(500).json({ detail: `Error al resetear factura: ${error.message}` });
   }
@@ -453,7 +544,33 @@ export async function getBatchStatus(req: AuthRequest, res: Response) {
       if (inv.dgii_track_id && company?.certificate_content) {
         try {
           dgiiStatus = await dgiiService.checkStatus(inv.dgii_track_id, Number(companyId), company.dgii_environment);
-        } catch (_) {
+          console.log(`[Batch DGII Status] TrackID: ${inv.dgii_track_id}, Result:`, JSON.stringify(dgiiStatus, null, 2));
+          
+          // Actualizar estado en la base de datos local si ha cambiado
+          const isApproved = dgiiStatus?.estado === 'Aceptado';
+          const isRejected = dgiiStatus?.estado === 'Rechazado';
+          const isPending = dgiiStatus?.estado === 'Pendiente' || dgiiStatus?.estado === 'AceptadoParcial';
+
+          if (isApproved || isRejected || isPending) {
+            const finalStatus = isApproved ? 'sent_to_dgii' : isPending ? 'sent_to_dgii' : 'rejected_by_dgii';
+            const finalDgiiStatus = isApproved ? 'sent' : isPending ? 'pending' : 'rejected';
+            
+            if (inv.status !== finalStatus || inv.dgii_status !== finalDgiiStatus) {
+              await prisma.invoice.update({
+                where: { id: inv.id },
+                data: {
+                  status: finalStatus,
+                  dgii_status: finalDgiiStatus,
+                  dgii_error: isRejected ? JSON.stringify(dgiiStatus.mensajes) : null,
+                },
+              });
+              // Actualizar el objeto en memoria para la respuesta JSON
+              inv.status = finalStatus;
+              inv.dgii_status = finalDgiiStatus;
+            }
+          }
+        } catch (err: any) {
+          console.error(`[Batch DGII Status Error] TrackID: ${inv.dgii_track_id}:`, err.message);
           dgiiStatus = { estado: 'error al consultar' };
         }
       }

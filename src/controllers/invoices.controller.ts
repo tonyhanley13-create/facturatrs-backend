@@ -16,7 +16,7 @@ export async function createInvoiceStandard(req: AuthRequest, res: Response) {
 
   try {
     const client = await prisma.client.findFirst({
-      where: { id: Number(client_id), company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: Number(client_id), company_id: req.user.company_id || undefined },
     });
 
     if (!client) {
@@ -25,7 +25,7 @@ export async function createInvoiceStandard(req: AuthRequest, res: Response) {
 
     // Generar número de factura
     const lastInvoice = await prisma.invoice.findFirst({
-      where: { company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { company_id: req.user.company_id || undefined },
       orderBy: { id: 'desc' },
     });
     let nextNum = 1;
@@ -80,7 +80,7 @@ export async function listInvoicesStandard(req: AuthRequest, res: Response) {
 
   try {
     const invoices = await prisma.invoice.findMany({
-      where: { company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { company_id: req.user.company_id || undefined },
     });
 
     return res.status(200).json(

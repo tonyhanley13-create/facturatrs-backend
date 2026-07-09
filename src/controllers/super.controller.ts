@@ -75,9 +75,9 @@ export async function updateUserRole(req: AuthRequest, res: Response) {
     return res.status(400).json({ detail: 'company_id y role son requeridos' });
   }
 
-  const validRoles = ['admin', 'user'];
+  const validRoles = ['admin', 'supervisor', 'cajero', 'user'];
   if (!validRoles.includes(role)) {
-    return res.status(400).json({ detail: 'Rol inválido. Use: admin o user' });
+    return res.status(400).json({ detail: 'Rol inválido. Use: admin, supervisor, cajero o user' });
   }
 
   try {

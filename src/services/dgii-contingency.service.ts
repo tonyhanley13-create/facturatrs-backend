@@ -1,7 +1,6 @@
 import prisma from '../models/db';
 import * as dgiiService from './dgii.service';
-import { getNextNcfNumber } from './ncf.service';
-import { resolveType } from './alanube.service';
+import { getNextNcfNumber, resolveType } from './ncf.service';
 
 export async function sendWithContingency(
   companyId: number,
@@ -74,10 +73,25 @@ export async function sendWithContingency(
         ? { MontoGravadoTotal: Number(invoice.subtotal), MontoGravadoI1: Number(invoice.subtotal), ITBIS1: 18, TotalITBIS: Number(invoice.tax_amount), TotalITBIS1: Number(invoice.tax_amount), MontoTotal: Number(invoice.total_amount) }
         : { MontoExento: Number(invoice.total_amount), MontoTotal: Number(invoice.total_amount) };
 
+      let sequenceExpirationDate = '31-12-2028';
+      if (invoice.company?.ncf_ranges) {
+        try {
+          const ranges = JSON.parse(invoice.company.ncf_ranges);
+          if (Array.isArray(ranges)) {
+            const range = ranges.find((r: any) => r.type === `E${ecfType}` || r.prefix === `E${ecfType}`);
+            if (range && range.expirationDate) {
+              sequenceExpirationDate = range.expirationDate;
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing company.ncf_ranges in contingency:', e);
+        }
+      }
+
       const ecfBody: any = {
         Encabezado: {
           Version: '1.0',
-          IdDoc: { TipoeCF: ecfType, eNCF: encfNumber, FechaVencimientoSecuencia: '31-12-2028', IndicadorEnvioDiferido: 1, TipoIngresos: '01', TipoPago: ecfType === 34 ? 2 : 1, TotalPaginas: 1 },
+          IdDoc: { TipoeCF: ecfType, eNCF: encfNumber, FechaVencimientoSecuencia: sequenceExpirationDate, TipoIngresos: '01', TipoPago: ecfType === 34 ? 2 : 1, TotalPaginas: 1 },
           Emisor: { RNCEmisor: rncEmisor.replace(/-/g, ''), RazonSocialEmisor: (invoice.company?.name || '').substring(0, 80), DireccionEmisor: (invoice.company?.address || 'CALLE PRINCIPAL #1').substring(0, 70), FechaEmision: todayStr },
           Comprador: { RNCComprador: rncComprador.replace(/-/g, ''), RazonSocialComprador: (invoice.client?.name || 'CLIENTE FINAL').substring(0, 80) },
           Totales: totales,

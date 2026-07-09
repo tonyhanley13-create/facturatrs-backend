@@ -48,7 +48,7 @@ export async function listClients(req: AuthRequest, res: Response) {
   try {
     const clients = await prisma.client.findMany({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
     });
 
@@ -79,7 +79,7 @@ export async function getClient(req: AuthRequest, res: Response) {
     const client = await prisma.client.findFirst({
       where: {
         id: clientId,
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
     });
 
@@ -114,7 +114,7 @@ export async function updateClient(req: AuthRequest, res: Response) {
     const client = await prisma.client.findFirst({
       where: {
         id: clientId,
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
     });
 
@@ -161,7 +161,7 @@ export async function deleteClient(req: AuthRequest, res: Response) {
     const client = await prisma.client.findFirst({
       where: {
         id: clientId,
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
     });
 

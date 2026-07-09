@@ -50,7 +50,7 @@ router.post('/backup/:invoiceId', authenticateToken, async (req: AuthRequest, re
   try {
     const prisma = (await import('../models/db')).default;
     const invoice = await prisma.invoice.findFirst({
-      where: { id: invoiceId, company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: invoiceId, company_id: req.user.company_id || undefined },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
 

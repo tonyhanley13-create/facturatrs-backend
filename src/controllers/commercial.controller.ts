@@ -4,6 +4,7 @@ import { AuthRequest } from '../middlewares/auth';
 import { Decimal } from '@prisma/client/runtime/library';
 import * as ExcelJS from 'exceljs';
 import { logInvoiceAction } from '../services/audit.service';
+import { getNcfTypesForMode, getNextNcfNumber, resolveTraditionalType, migrateNcfSequences } from '../services/ncf.service';
 
 // ==========================================
 // HELPER FUNCTIONS FOR LIMITS & LOGS
@@ -107,30 +108,51 @@ async function logUsage(userId: number, action: string, extraData?: any) {
 }
 
 export async function generateInvoiceNumber(userId: number, companyId: number): Promise<string> {
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+  });
+
+  const prefix = company?.invoice_prefix || 'FACT-';
+  let nextNum = company?.next_invoice_number || 1;
+
   const lastInvoice = await prisma.invoice.findFirst({
     where: {
-      user_id: userId,
       company_id: companyId,
     },
     orderBy: { id: 'desc' },
   });
 
-  let nextNum = 1;
   if (lastInvoice && lastInvoice.invoice_number) {
     try {
       const parts = lastInvoice.invoice_number.split('-');
-      if (parts.length > 1) {
-        const lastNum = parseInt(parts[1], 10);
-        if (!isNaN(lastNum)) {
-          nextNum = lastNum + 1;
-        }
+      const numPart = parts.length > 1 ? parts[1] : lastInvoice.invoice_number.replace(/^\D+/g, '');
+      const lastNum = parseInt(numPart, 10);
+      if (!isNaN(lastNum) && lastNum >= nextNum) {
+        nextNum = lastNum + 1;
       }
     } catch (err) {
-      nextNum = 1;
+      // Ignorar error de parsing
     }
   }
 
-  return `FACT-${nextNum.toString().padStart(6, '0')}`;
+  // Actualizar next_invoice_number en Company para mantener la consistencia
+  await prisma.company.update({
+    where: { id: companyId },
+    data: { next_invoice_number: nextNum + 1 },
+  });
+
+  // También actualizar en companySettings legacy por consistencia
+  const settings = await prisma.companySettings.findFirst({
+    where: { user_id: userId },
+  });
+  if (settings) {
+    await prisma.companySettings.update({
+      where: { id: settings.id },
+      data: { next_invoice_number: nextNum + 1 },
+    });
+  }
+
+  return `${prefix}${nextNum.toString().padStart(6, '0')}`;
 }
 
 // ==========================================
@@ -143,6 +165,10 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
   }
 
   try {
+    const company = await prisma.company.findFirst({
+      where: { id: req.user.company_id },
+    });
+
     let settings = await prisma.companySettings.findFirst({
       where: { user_id: req.user.id },
     });
@@ -152,8 +178,8 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
       settings = await prisma.companySettings.create({
         data: {
           user_id: req.user.id,
-          company_name: req.user.email.split('@')[0],
-          company_rnc: '132109122', // Por defecto sandbox
+          company_name: company?.name || req.user.email.split('@')[0],
+          company_rnc: company?.rnc || '132109122', // Por defecto sandbox
           required_client_fields: JSON.stringify(['name', 'rnc', 'email']),
           client_custom_fields: JSON.stringify([]),
           invoice_template: 'default',
@@ -165,25 +191,27 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
         },
       });
     }
-
-    // Obtener datos del modelo Company (multi-empresa)
-    const company = await prisma.company.findFirst({
-      where: { id: req.user.company_id },
-    });
-
     // Leer rangos NCF desde Company (per-company) con fallback a CompanySettings (legacy)
-    const defaultRanges = [
-      { type: 'E31', prefix: 'E31', next: 1, end: 10 },
-      { type: 'E32', prefix: 'E32', next: 1, end: 15 },
-      { type: 'E33', prefix: 'E33', next: 1, end: 5 },
-      { type: 'E34', prefix: 'E34', next: 1, end: 5 },
-      { type: 'E41', prefix: 'E41', next: 1, end: 5 },
-      { type: 'E43', prefix: 'E43', next: 1, end: 5 },
-      { type: 'E44', prefix: 'E44', next: 1, end: 5 },
-      { type: 'E45', prefix: 'E45', next: 1, end: 5 },
-      { type: 'E46', prefix: 'E46', next: 1, end: 5 },
-      { type: 'E47', prefix: 'E47', next: 1, end: 5 }
-    ];
+    const mode = company?.invoicing_mode || 'electronica';
+    const defaultRanges = mode === 'tradicional'
+      ? [
+          { type: 'B01', prefix: 'B01', next: 1, end: 100 },
+          { type: 'B02', prefix: 'B02', next: 1, end: 100 },
+          { type: 'B03', prefix: 'B03', next: 1, end: 50 },
+          { type: 'B04', prefix: 'B04', next: 1, end: 50 },
+        ]
+      : [
+          { type: 'E31', prefix: 'E31', next: 1, end: 10 },
+          { type: 'E32', prefix: 'E32', next: 1, end: 15 },
+          { type: 'E33', prefix: 'E33', next: 1, end: 5 },
+          { type: 'E34', prefix: 'E34', next: 1, end: 5 },
+          { type: 'E41', prefix: 'E41', next: 1, end: 5 },
+          { type: 'E43', prefix: 'E43', next: 1, end: 5 },
+          { type: 'E44', prefix: 'E44', next: 1, end: 5 },
+          { type: 'E45', prefix: 'E45', next: 1, end: 5 },
+          { type: 'E46', prefix: 'E46', next: 1, end: 5 },
+          { type: 'E47', prefix: 'E47', next: 1, end: 5 },
+        ];
 
     let ncfRanges = defaultRanges;
     if (company?.ncf_ranges) {
@@ -193,13 +221,27 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
           ncfRanges = parsed;
         }
       } catch (e) { }
-    } else if (settings.client_custom_fields) {
-      try {
-        const parsed = JSON.parse(settings.client_custom_fields);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          ncfRanges = parsed;
+
+    }
+
+    // Sobrescribir con los valores en vivo de la tabla ncfSequence
+    if (company?.id) {
+      const liveSequences = await prisma.ncfSequence.findMany({
+        where: { company_id: company.id },
+      });
+      const liveMap = new Map(liveSequences.map(s => [s.type, s]));
+
+      ncfRanges = ncfRanges.map((range: any) => {
+        const live = liveMap.get(range.type);
+        if (live) {
+          return {
+            ...range,
+            next: live.next,
+            end: live.end,
+          };
         }
-      } catch (e) { }
+        return range;
+      });
     }
 
     return res.status(200).json({
@@ -219,6 +261,8 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
       invoice_prefix: company?.invoice_prefix || 'FACT-',
       alanube_company_id: company?.alanube_company_id || settings.alanube_company_id,
       fiscal_provider: company?.fiscal_provider || 'alanube',
+      invoicing_mode: company?.invoicing_mode || 'electronica',
+      electronic_start_date: company?.electronic_start_date || null,
       gae_company_id: company?.gae_company_id || null,
       certificate_name: company?.certificate_name || null,
       limits: {
@@ -287,11 +331,68 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
           invoice_prefix: invoice_prefix !== undefined ? invoice_prefix : undefined,
         },
       });
+
+      // Sincronizar los rangos con la tabla ncfSequence
+      await migrateNcfSequences(req.user.company_id);
     }
 
     return res.status(200).json({ message: 'Configuración actualizada exitosamente', data: updated });
   } catch (error: any) {
     console.error('❌ Error al actualizar configuración de empresa:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}
+
+const VALID_MODES = ['tradicional', 'electronica', 'transicion'];
+
+export async function updateInvoicingMode(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  const { invoicing_mode } = req.body;
+  const companyId = req.user.company_id;
+
+  if (!companyId) {
+    return res.status(400).json({ detail: 'No hay empresa activa' });
+  }
+
+  if (!invoicing_mode || !VALID_MODES.includes(invoicing_mode)) {
+    return res.status(400).json({ detail: `Modalidad inválida. Use: ${VALID_MODES.join(', ')}` });
+  }
+
+  try {
+    const data: any = { invoicing_mode };
+
+    // Si cambia a electrónica y no tiene fecha de inicio, establecerla ahora
+    if (invoicing_mode === 'electronica') {
+      const company = await prisma.company.findUnique({ where: { id: companyId } });
+      if (company && !company.electronic_start_date) {
+        data.electronic_start_date = new Date();
+      }
+    }
+
+    await prisma.company.update({
+      where: { id: companyId },
+      data,
+    });
+
+    // Migrar secuencias NCF a los tipos de la nueva modalidad
+    const validTypes = getNcfTypesForMode(invoicing_mode);
+    const existingSeqs = await prisma.ncfSequence.findMany({
+      where: { company_id: companyId },
+    });
+    for (const seq of existingSeqs) {
+      if (!validTypes.includes(seq.type)) {
+        await prisma.ncfSequence.delete({
+          where: { company_id_type: { company_id: companyId, type: seq.type } },
+        });
+      }
+    }
+
+    return res.status(200).json({ message: 'Modalidad de facturación actualizada', invoicing_mode });
+  } catch (error: any) {
+    console.error('❌ Error al actualizar modalidad de facturación:', error);
     return res.status(500).json({ detail: error.message });
   }
 }
@@ -307,7 +408,7 @@ export async function getProducts(req: AuthRequest, res: Response) {
     console.log(`🔍 Buscando productos del catálogo para company_id: ${req.user.company_id}`);
     const products = await prisma.productService.findMany({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
         is_active: true,
         category: category ? String(category) : undefined,
       },
@@ -382,7 +483,7 @@ export async function updateProduct(req: AuthRequest, res: Response) {
 
   try {
     const product = await prisma.productService.findFirst({
-      where: { id: productId, company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: productId, company_id: req.user.company_id || undefined },
     });
 
     if (!product) {
@@ -421,7 +522,7 @@ export async function deleteProduct(req: AuthRequest, res: Response) {
 
   try {
     const product = await prisma.productService.findFirst({
-      where: { id: productId, company_id: req.user.is_super_admin ? undefined : req.user.company_id },
+      where: { id: productId, company_id: req.user.company_id || undefined },
     });
 
     if (!product) {
@@ -450,7 +551,7 @@ export async function getInvoice(req: AuthRequest, res: Response) {
     const invoice = await prisma.invoice.findFirst({
       where: {
         id: invoiceId,
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
       include: { client: true, items: true, user: true },
     });
@@ -520,7 +621,7 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
     const invoice = await prisma.invoice.findFirst({
       where: {
         id: invoiceId,
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
@@ -596,6 +697,24 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
       });
     });
 
+    // Generar NCF si la factura no tiene uno (ej. comprobantes tradicionales creados antes del fix)
+    if (!invoice.ncf) {
+      const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
+      if (company && company.invoicing_mode === 'tradicional') {
+        let docTypeName = 'Factura de Crédito Fiscal';
+        try {
+          const parsed = typeof custom_fields === 'object' ? custom_fields : JSON.parse(custom_fields || '{}');
+          docTypeName = parsed.documento_tipo || docTypeName;
+        } catch (_) {}
+        const traditionalPrefix = resolveTraditionalType(docTypeName);
+        const ncf = await getNextNcfNumber(req.user.company_id, traditionalPrefix);
+        await prisma.invoice.update({
+          where: { id: invoiceId },
+          data: { ncf },
+        });
+      }
+    }
+
     logInvoiceAction(invoiceId, req.user.id, 'updated', invoice.status, 'draft', 'Factura actualizada');
     return res.status(200).json({ id: invoiceId, message: 'Factura actualizada exitosamente' });
   } catch (error: any) {
@@ -614,7 +733,7 @@ export async function deleteInvoice(req: AuthRequest, res: Response) {
     const invoice = await prisma.invoice.findFirst({
       where: {
         id: invoiceId,
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
       },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
@@ -645,8 +764,9 @@ export async function getInvoices(req: AuthRequest, res: Response) {
   try {
     const invoices = await prisma.invoice.findMany({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
         status: status ? String(status) : undefined,
+        user_id: req.user.is_super_admin ? undefined : req.user.id,
       },
       include: {
         client: true,
@@ -835,7 +955,25 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     await logUsage(userId, 'invoice_created', { revenue: calculatedTotal });
     logInvoiceAction(newInvoice.id, userId, 'created', undefined, 'draft', `Factura creada por $${calculatedTotal}`);
 
-    return res.status(200).json({ id: newInvoice.id, number: newInvoice.invoice_number });
+    // Generar NCF automático para comprobantes tradicionales (B01-B04)
+    const company = await prisma.company.findUnique({ where: { id: companyId } });
+    if (company && company.invoicing_mode === 'tradicional') {
+      let docTypeName = 'Factura de Crédito Fiscal';
+      try {
+        if (custom_fields && typeof custom_fields === 'object') {
+          docTypeName = custom_fields.documento_tipo || docTypeName;
+        }
+      } catch (_) {}
+      const traditionalPrefix = resolveTraditionalType(docTypeName);
+      const ncf = await getNextNcfNumber(companyId, traditionalPrefix);
+      await prisma.invoice.update({
+        where: { id: newInvoice.id },
+        data: { ncf, status: 'draft' },
+      });
+    }
+
+    const finalInvoice = await prisma.invoice.findUnique({ where: { id: newInvoice.id } });
+    return res.status(200).json({ id: newInvoice.id, number: newInvoice.invoice_number, ncf: finalInvoice?.ncf || null });
   } catch (error: any) {
     console.error('❌ Error al crear factura con items:', error);
     return res.status(500).json({ detail: error.message });
@@ -865,7 +1003,7 @@ export async function getDashboardData(req: AuthRequest, res: Response) {
     // Consultar facturas del periodo
     const invoices = await prisma.invoice.findMany({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
         created_at: { gte: startDate },
       },
       include: {
@@ -874,17 +1012,33 @@ export async function getDashboardData(req: AuthRequest, res: Response) {
       },
     });
 
-    const totalInvoices = invoices.length;
-    const totalAmount = invoices.reduce((acc: number, inv: { total_amount: any; }) => acc + Number(inv.total_amount), 0);
-    const paidInvoices = invoices.filter((inv: { status: string; }) => inv.status === 'paid').length;
+    // Filtrar por modalidad (solo facturas que correspondan al modo de facturación)
+    let filteredInvoices = invoices;
+    if (!req.user.is_super_admin) {
+      const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
+      const mode = company?.invoicing_mode || 'electronica';
+      if (mode !== 'transicion') {
+        filteredInvoices = filteredInvoices.filter((inv: any) => {
+          if (inv.ncf && inv.ncf.length > 0) {
+            if (inv.ncf.startsWith('B')) return mode === 'tradicional';
+            if (inv.ncf.startsWith('E')) return mode === 'electronica';
+          }
+          return true;
+        });
+      }
+    }
+
+    const totalInvoices = filteredInvoices.length;
+    const totalAmount = filteredInvoices.reduce((acc: number, inv: { total_amount: any; }) => acc + Number(inv.total_amount), 0);
+    const paidInvoices = filteredInvoices.filter((inv: { status: string; }) => inv.status === 'paid').length;
 
     // Clientes únicos
-    const uniqueClientsSet = new Set(invoices.map((inv: { client: { rnc: any; }; }) => inv.client.rnc));
+    const uniqueClientsSet = new Set(filteredInvoices.map((inv: { client: { rnc: any; }; }) => inv.client.rnc));
     const uniqueClients = uniqueClientsSet.size;
 
     // Productos más vendidos (agrupados en Node.js)
     const productSalesMap: { [name: string]: number } = {};
-    invoices.forEach((inv: { items: any[]; }) => {
+    filteredInvoices.forEach((inv: { items: any[]; }) => {
       inv.items.forEach((item: { description: any; item_name: any; quantity: any; }) => {
         const name = item.description || item.item_name;
         productSalesMap[name] = (productSalesMap[name] || 0) + Number(item.quantity);
@@ -911,7 +1065,7 @@ export async function getDashboardData(req: AuthRequest, res: Response) {
 
     const monthlyInvoices = await prisma.invoice.count({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
         created_at: { gte: startOfMonth },
       },
     });
@@ -956,7 +1110,7 @@ export async function exportSalesReportToExcel(req: AuthRequest, res: Response) 
 
     const invoices = await prisma.invoice.findMany({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
         created_at: {
           gte: start,
           lte: end,
@@ -970,6 +1124,21 @@ export async function exportSalesReportToExcel(req: AuthRequest, res: Response) 
     });
 
     let filteredInvoices = invoices;
+
+    // Filtrar por modalidad
+    if (!req.user.is_super_admin) {
+      const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
+      const mode = company?.invoicing_mode || 'electronica';
+      if (mode !== 'transicion') {
+        filteredInvoices = filteredInvoices.filter((inv: any) => {
+          if (inv.ncf && inv.ncf.length > 0) {
+            if (inv.ncf.startsWith('B')) return mode === 'tradicional';
+            if (inv.ncf.startsWith('E')) return mode === 'electronica';
+          }
+          return true;
+        });
+      }
+    }
 
     if (document_type) {
       const docTypeStr = String(document_type).toLowerCase();
@@ -1086,6 +1255,129 @@ export async function exportSalesReportToExcel(req: AuthRequest, res: Response) 
   }
 }
 
+export async function getDetailedSalesReport(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  const { start_date, end_date, document_type, is_credit } = req.query;
+
+  if (!start_date || !end_date) {
+    return res.status(400).json({ detail: 'start_date y end_date son requeridos' });
+  }
+
+  try {
+    const start = new Date(String(start_date));
+    const end = new Date(String(end_date));
+
+    // Fetch company info
+    const company = req.user.is_super_admin
+      ? null
+      : await prisma.company.findUnique({ where: { id: req.user.company_id } });
+
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        company_id: req.user.company_id || undefined,
+        created_at: { gte: start, lte: end },
+      },
+      include: {
+        client: { select: { name: true, rnc: true } },
+        items: true,
+      },
+      orderBy: { created_at: 'asc' },
+    });
+
+    let filteredInvoices = invoices;
+
+    // Filtrar por modalidad
+    if (!req.user.is_super_admin && company) {
+      const mode = company.invoicing_mode || 'electronica';
+      if (mode !== 'transicion') {
+        filteredInvoices = filteredInvoices.filter((inv: any) => {
+          if (inv.ncf && inv.ncf.length > 0) {
+            if (inv.ncf.startsWith('B')) return mode === 'tradicional';
+            if (inv.ncf.startsWith('E')) return mode === 'electronica';
+          }
+          return true;
+        });
+      }
+    }
+
+    if (document_type) {
+      const docTypeStr = String(document_type).toLowerCase();
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        try {
+          const custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {};
+          return String(custom.documento_tipo || '').toLowerCase() === docTypeStr;
+        } catch { return false; }
+      });
+    }
+
+    if (is_credit !== undefined && is_credit !== '') {
+      const wantCredit = is_credit === 'true' || is_credit === '1';
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        try {
+          const custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {};
+          return (custom.facturado_a_credito === true) === wantCredit;
+        } catch { return false; }
+      });
+    }
+
+    const statusMap: Record<string, string> = {
+      draft: 'Borrador', issued: 'Emitida', sent_to_alanube: 'Emitida',
+      sent_to_dgii: 'Emitida', paid: 'Pagada', rejected_by_dgii: 'Rechazada',
+      voided: 'Cancelada', error: 'Cancelada',
+    };
+
+    const data = filteredInvoices.map((inv: any, idx: number) => {
+      const custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {};
+      return {
+        index: idx + 1,
+        number: inv.number,
+        ncf: inv.ncf ?? '',
+        date: inv.created_at ? new Date(inv.created_at).toISOString() : '',
+        client_name: inv.client?.name ?? '',
+        client_rnc: inv.client?.rnc ?? '',
+        status: statusMap[inv.status] ?? inv.status,
+        status_raw: inv.status,
+        total_amount: Number(inv.total_amount),
+        itbis: Number(custom.itpis18 ?? 0),
+        exento: Number(custom.monto_exento ?? 0),
+        created_by: inv.created_by ?? '',
+      };
+    });
+
+    const totalAmount = data.reduce((sum: number, inv: any) => sum + inv.total_amount, 0);
+    const totalItbis = data.reduce((sum: number, inv: any) => sum + inv.itbis, 0);
+    const totalExento = data.reduce((sum: number, inv: any) => sum + inv.exento, 0);
+    const paidCount = data.filter((inv: any) => inv.status_raw === 'paid').length;
+
+    return res.status(200).json({
+      company: company ? {
+        name: company.name,
+        rnc: company.rnc,
+        invoicing_mode: company.invoicing_mode,
+      } : null,
+      period: {
+        start_date: String(start_date),
+        end_date: String(end_date),
+      },
+      summary: {
+        total_invoices: data.length,
+        paid_invoices: paidCount,
+        pending_invoices: data.length - paidCount,
+        total_amount: totalAmount,
+        total_itbis: totalItbis,
+        total_exento: totalExento,
+      },
+      data,
+    });
+  } catch (error: any) {
+    console.error('❌ Error en reporte detallado:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}
+
 export async function getSalesReport(req: AuthRequest, res: Response) {
   if (!req.user) {
     return res.status(401).json({ detail: 'No autorizado' });
@@ -1105,7 +1397,7 @@ export async function getSalesReport(req: AuthRequest, res: Response) {
 
     const invoices = await prisma.invoice.findMany({
       where: {
-        company_id: req.user.is_super_admin ? undefined : req.user.company_id,
+        company_id: req.user.company_id || undefined,
         created_at: {
           gte: start,
           lte: end,
@@ -1113,8 +1405,22 @@ export async function getSalesReport(req: AuthRequest, res: Response) {
       },
     });
 
-    // Filtrar por tipo de documento y/o crédito en memoria
+    // Filtrar por modalidad (solo facturas que correspondan al modo de facturación)
     let filteredInvoices = invoices;
+
+    if (!req.user.is_super_admin) {
+      const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
+      const mode = company?.invoicing_mode || 'electronica';
+      if (mode !== 'transicion') {
+        filteredInvoices = filteredInvoices.filter((inv: any) => {
+          if (inv.ncf && inv.ncf.length > 0) {
+            if (inv.ncf.startsWith('B')) return mode === 'tradicional';
+            if (inv.ncf.startsWith('E')) return mode === 'electronica';
+          }
+          return true;
+        });
+      }
+    }
 
     if (document_type) {
       const docTypeStr = String(document_type).toLowerCase();
