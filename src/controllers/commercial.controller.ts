@@ -265,6 +265,7 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
       electronic_start_date: company?.electronic_start_date || null,
       gae_company_id: company?.gae_company_id || null,
       certificate_name: company?.certificate_name || null,
+      logo_url: company?.logo_url || null,
       limits: {
         invoices: settings.monthly_invoice_limit,
         users: settings.user_limit,
@@ -282,7 +283,7 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { required_client_fields, client_custom_fields, invoice_template, currency, tax_rate, company_name, company_rnc, company_address, company_email, company_phone, next_invoice_number, invoice_prefix } = req.body;
+  const { required_client_fields, client_custom_fields, invoice_template, currency, tax_rate, company_name, company_rnc, company_address, company_email, company_phone, next_invoice_number, invoice_prefix, logo_url } = req.body;
 
   try {
     let settings = await prisma.companySettings.findFirst({
@@ -329,6 +330,7 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
           ncf_ranges: client_custom_fields !== undefined ? JSON.stringify(client_custom_fields) : undefined,
           next_invoice_number: next_invoice_number !== undefined ? next_invoice_number : undefined,
           invoice_prefix: invoice_prefix !== undefined ? invoice_prefix : undefined,
+          logo_url: logo_url !== undefined ? logo_url : undefined,
         },
       });
 

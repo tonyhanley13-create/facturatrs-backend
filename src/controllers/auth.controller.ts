@@ -309,7 +309,7 @@ export async function listCompanies(req: AuthRequest, res: Response) {
       const allCompanies = await prisma.company.findMany({
         orderBy: { name: 'asc' },
         select: {
-          id: true, name: true, rnc: true, fiscal_provider: true,
+          id: true, name: true, rnc: true, fiscal_provider: true, logo_url: true,
         },
       });
       const companies = allCompanies.map((c) => ({
@@ -317,6 +317,7 @@ export async function listCompanies(req: AuthRequest, res: Response) {
         can_switch_company: true, is_active: c.id === req.user!.company_id,
         fiscal_provider: c.fiscal_provider,
         permissions: null,
+        logo_url: c.logo_url,
       }));
       return res.status(200).json(companies);
     }
@@ -336,6 +337,7 @@ export async function listCompanies(req: AuthRequest, res: Response) {
       is_active: uc.company_id === req.user!.company_id,
       fiscal_provider: uc.company.fiscal_provider,
       permissions: uc.permissions,
+      logo_url: uc.company.logo_url,
     }));
 
     return res.status(200).json(companies);

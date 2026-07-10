@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import { PORT } from './config';
 import { startReconciliationScheduler } from './services/reconciliation.service';
 
@@ -37,6 +38,8 @@ app.use(cors({
 }));
 
 app.use(express.json());
+// Servir archivos subidos (logos, etc.) como estáticos
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // Logging middleware para diagnóstico
 app.use((req, res, next) => {

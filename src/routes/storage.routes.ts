@@ -1,8 +1,60 @@
 import { Router, Request, Response } from 'express';
 import { authenticateToken, AuthRequest } from '../middlewares/auth';
 import { getInvoiceFile, saveInvoiceFile, getStorageInfo } from '../services/storage.service';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
 
 const router = Router();
+
+// Configurar multer para guardar logos en la carpeta /uploads/logos/
+const logoStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    const uploadDir = path.join(__dirname, '..', '..', 'uploads', 'logos');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
+  },
+  filename: (req: any, file, cb) => {
+    const companyId = req.user?.company_id || 'unknown';
+    const ext = path.extname(file.originalname).toLowerCase() || '.png';
+    cb(null, `logo-company-${companyId}${ext}`);
+  },
+});
+
+const uploadLogo = multer({
+  storage: logoStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // Máx 5MB
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Solo se permiten imágenes (JPG, PNG, WEBP, SVG)'));
+  },
+});
+
+// Subir logotipo de empresa
+router.post('/logo', authenticateToken, uploadLogo.single('logo'), async (req: AuthRequest, res: Response) => {
+  if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
+  if (!req.file) return res.status(400).json({ detail: 'No se recibió ningún archivo' });
+
+  try {
+    const prisma = (await import('../models/db')).default;
+
+    // Construir URL pública del logo
+    const protocol = req.protocol;
+    const host = req.get('host');
+    const logoUrl = `${protocol}://${host}/uploads/logos/${req.file.filename}`;
+
+    // Actualizar logo_url en la empresa
+    await prisma.company.update({
+      where: { id: req.user.company_id },
+      data: { logo_url: logoUrl },
+    });
+
+    return res.status(200).json({ success: true, logo_url: logoUrl });
+  } catch (error: any) {
+    return res.status(500).json({ detail: error.message });
+  }
+});
 
 function extractSignedXml(invoice: any): string | null {
   if (invoice.dgii_signed_xml) return invoice.dgii_signed_xml;

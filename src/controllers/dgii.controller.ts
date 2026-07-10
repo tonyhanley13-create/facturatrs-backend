@@ -530,7 +530,11 @@ export async function getBatchStatus(req: AuthRequest, res: Response) {
     const invoices = await prisma.invoice.findMany({
       where: {
         company_id: Number(companyId),
-        dgii_track_id: { not: null },
+        OR: [
+          { dgii_track_id: { not: null } },
+          { status: { in: ['sent_to_dgii', 'rejected_by_dgii'] } },
+          { dgii_status: { not: null } },
+        ],
       },
       orderBy: { created_at: 'desc' },
       include: { client: { select: { name: true, rnc: true } } },
@@ -538,55 +542,95 @@ export async function getBatchStatus(req: AuthRequest, res: Response) {
 
     const company = await prisma.company.findUnique({ where: { id: Number(companyId) } });
 
-    const results = [];
-    for (const inv of invoices) {
-      let dgiiStatus: any = { estado: 'no consultado' };
-      if (inv.dgii_track_id && company?.certificate_content) {
-        try {
-          dgiiStatus = await dgiiService.checkStatus(inv.dgii_track_id, Number(companyId), company.dgii_environment);
-          console.log(`[Batch DGII Status] TrackID: ${inv.dgii_track_id}, Result:`, JSON.stringify(dgiiStatus, null, 2));
-          
-          // Actualizar estado en la base de datos local si ha cambiado
-          const isApproved = dgiiStatus?.estado === 'Aceptado';
-          const isRejected = dgiiStatus?.estado === 'Rechazado';
-          const isPending = dgiiStatus?.estado === 'Pendiente' || dgiiStatus?.estado === 'AceptadoParcial';
+    // Ejecutar consultas en paralelo utilizando Promise.all
+    const results = await Promise.all(
+      invoices.map(async (inv) => {
+        let dgiiStatus: any = { estado: 'no consultado' };
+        
+        // 1. Usar valores en caché si ya están en un estado final
+        if (inv.dgii_status === 'sent' || inv.dgii_status === 'Aceptado') {
+          dgiiStatus = { estado: 'Aceptado' };
+        } else if (inv.dgii_status === 'Aceptado Condicional') {
+          dgiiStatus = { estado: 'Aceptado Condicional' };
+        } else if (inv.dgii_status === 'rejected' || inv.dgii_status === 'Rechazado') {
+          let mensajes = [];
+          try {
+            if (inv.dgii_error) mensajes = JSON.parse(inv.dgii_error);
+          } catch (e) {}
+          dgiiStatus = { estado: 'Rechazado', mensajes };
+        } else if (inv.dgii_status === 'No encontrado.') {
+          dgiiStatus = { estado: 'No encontrado.' };
+        }
 
-          if (isApproved || isRejected || isPending) {
-            const finalStatus = isApproved ? 'sent_to_dgii' : isPending ? 'sent_to_dgii' : 'rejected_by_dgii';
-            const finalDgiiStatus = isApproved ? 'sent' : isPending ? 'pending' : 'rejected';
+        // 2. Determinar si requiere consulta en vivo a la DGII
+        const ageInHours = (Date.now() - new Date(inv.created_at).getTime()) / (1000 * 60 * 60);
+        
+        const isFinal = inv.dgii_status === 'sent' || 
+                        inv.dgii_status === 'Aceptado' || 
+                        inv.dgii_status === 'Aceptado Condicional' || 
+                        inv.dgii_status === 'rejected' || 
+                        inv.dgii_status === 'Rechazado';
+
+        // Solo consultamos si no es final, tiene track_id y fue creada hace menos de 48 horas
+        const needsDgiiCheck = !isFinal && inv.dgii_track_id && ageInHours < 48;
+
+        if (needsDgiiCheck && company?.certificate_content) {
+          try {
+            dgiiStatus = await dgiiService.checkStatus(inv.dgii_track_id!, Number(companyId), company.dgii_environment);
+            console.log(`[Batch DGII Status Live Check] TrackID: ${inv.dgii_track_id}, Result:`, JSON.stringify(dgiiStatus, null, 2));
             
-            if (inv.status !== finalStatus || inv.dgii_status !== finalDgiiStatus) {
+            const isApproved = dgiiStatus?.estado === 'Aceptado' || dgiiStatus?.estado === 'Aceptado Condicional';
+            const isRejected = dgiiStatus?.estado === 'Rechazado';
+            const isPending = dgiiStatus?.estado === 'Pendiente' || dgiiStatus?.estado === 'AceptadoParcial';
+
+            if (isApproved || isRejected || isPending) {
+              const finalStatus = isApproved ? 'sent_to_dgii' : isPending ? 'sent_to_dgii' : 'rejected_by_dgii';
+              const finalDgiiStatus = isApproved 
+                ? (dgiiStatus?.estado === 'Aceptado Condicional' ? 'Aceptado Condicional' : 'sent')
+                : isPending ? 'pending' : 'rejected';
+              
+              if (inv.status !== finalStatus || inv.dgii_status !== finalDgiiStatus) {
+                await prisma.invoice.update({
+                  where: { id: inv.id },
+                  data: {
+                    status: finalStatus,
+                    dgii_status: finalDgiiStatus,
+                    dgii_error: isRejected ? JSON.stringify(dgiiStatus.mensajes) : null,
+                  },
+                });
+                inv.status = finalStatus;
+                inv.dgii_status = finalDgiiStatus;
+              }
+            } else if (dgiiStatus?.estado === 'No encontrado.') {
+              // Si DGII nos dice explícitamente "No encontrado", lo guardamos para evitar re-intentar en cada carga
               await prisma.invoice.update({
                 where: { id: inv.id },
                 data: {
-                  status: finalStatus,
-                  dgii_status: finalDgiiStatus,
-                  dgii_error: isRejected ? JSON.stringify(dgiiStatus.mensajes) : null,
+                  dgii_status: 'No encontrado.',
                 },
               });
-              // Actualizar el objeto en memoria para la respuesta JSON
-              inv.status = finalStatus;
-              inv.dgii_status = finalDgiiStatus;
+              inv.dgii_status = 'No encontrado.';
             }
+          } catch (err: any) {
+            console.error(`[Batch DGII Status Error] TrackID: ${inv.dgii_track_id}:`, err.message);
+            dgiiStatus = { estado: 'error al consultar' };
           }
-        } catch (err: any) {
-          console.error(`[Batch DGII Status Error] TrackID: ${inv.dgii_track_id}:`, err.message);
-          dgiiStatus = { estado: 'error al consultar' };
         }
-      }
-      results.push({
-        id: inv.id,
-        invoice_number: inv.invoice_number,
-        ncf: inv.ncf,
-        total_amount: inv.total_amount,
-        client_name: inv.client?.name,
-        client_rnc: inv.client?.rnc,
-        created_at: inv.created_at,
-        local_status: inv.status,
-        local_dgii_status: inv.dgii_status,
-        dgii: dgiiStatus,
-      });
-    }
+
+        return {
+          id: inv.id,
+          invoice_number: inv.invoice_number,
+          ncf: inv.ncf,
+          total_amount: inv.total_amount,
+          client_name: inv.client?.name,
+          client_rnc: inv.client?.rnc,
+          created_at: inv.created_at,
+          local_status: inv.status,
+          local_dgii_status: inv.dgii_status,
+          dgii: dgiiStatus,
+        };
+      })
+    );
 
     return res.status(200).json(results);
   } catch (error: any) {
