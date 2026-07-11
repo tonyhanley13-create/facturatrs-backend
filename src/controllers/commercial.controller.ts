@@ -4,7 +4,7 @@ import { AuthRequest } from '../middlewares/auth';
 import { Decimal } from '@prisma/client/runtime/library';
 import * as ExcelJS from 'exceljs';
 import { logInvoiceAction } from '../services/audit.service';
-import { getNcfTypesForMode, getNextNcfNumber, resolveTraditionalType, migrateNcfSequences } from '../services/ncf.service';
+import { getNcfTypesForMode, getNextNcfNumber, resolveTraditionalType, migrateNcfSequences, NCF_PREFIXES } from '../services/ncf.service';
 
 // ==========================================
 // HELPER FUNCTIONS FOR LIMITS & LOGS
@@ -218,10 +218,13 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
       try {
         const parsed = JSON.parse(company.ncf_ranges);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          ncfRanges = parsed;
+          const validTypes = getNcfTypesForMode(mode);
+          const filtered = parsed.filter((r: any) => validTypes.includes(r.type || r.prefix));
+          if (filtered.length > 0) {
+            ncfRanges = filtered;
+          }
         }
       } catch (e) { }
-
     }
 
     // Sobrescribir con los valores en vivo de la tabla ncfSequence
@@ -379,7 +382,7 @@ export async function updateInvoicingMode(req: AuthRequest, res: Response) {
       data,
     });
 
-    // Migrar secuencias NCF a los tipos de la nueva modalidad
+    // 1. Eliminar secuencias que ya no son válidas para la nueva modalidad
     const validTypes = getNcfTypesForMode(invoicing_mode);
     const existingSeqs = await prisma.ncfSequence.findMany({
       where: { company_id: companyId },
@@ -392,7 +395,85 @@ export async function updateInvoicingMode(req: AuthRequest, res: Response) {
       }
     }
 
-    return res.status(200).json({ message: 'Modalidad de facturación actualizada', invoicing_mode });
+    // 2. Para cada tipo válido de la nueva modalidad, inicializar/sincronizar leyendo
+    // la última factura emitida en la base de datos para esta empresa
+    for (const type of validTypes) {
+      const prefix = NCF_PREFIXES[type];
+      if (!prefix) continue;
+
+      const lastInvoice = await prisma.invoice.findFirst({
+        where: {
+          company_id: companyId,
+          ncf: {
+            startsWith: prefix,
+          },
+        },
+        orderBy: {
+          id: 'desc',
+        },
+      });
+
+      let lastDbNumber = 0;
+      if (lastInvoice && lastInvoice.ncf) {
+        const correlativeStr = lastInvoice.ncf.slice(prefix.length);
+        const parsedNum = parseInt(correlativeStr, 10);
+        if (!isNaN(parsedNum)) {
+          lastDbNumber = parsedNum;
+        }
+      }
+
+      const nextFromDb = lastDbNumber + 1;
+
+      // Buscar si ya existe la secuencia en la BD
+      const existing = await prisma.ncfSequence.findUnique({
+        where: { company_id_type: { company_id: companyId, type } },
+      });
+
+      const finalNext = existing ? Math.max(existing.next, nextFromDb) : nextFromDb;
+
+      await prisma.ncfSequence.upsert({
+        where: { company_id_type: { company_id: companyId, type } },
+        create: {
+          company_id: companyId,
+          type,
+          prefix,
+          next: finalNext,
+          end: 999999,
+        },
+        update: {
+          next: finalNext,
+        },
+      });
+    }
+
+    // 3. Sincronizar también el siguiente número de factura (next_invoice_number) de la empresa
+    const lastInvoiceAny = await prisma.invoice.findFirst({
+      where: { company_id: companyId },
+      orderBy: { id: 'desc' },
+    });
+
+    let nextInvoiceNum = 1;
+    if (lastInvoiceAny && lastInvoiceAny.invoice_number) {
+      try {
+        const parts = lastInvoiceAny.invoice_number.split('-');
+        const numPart = parts.length > 1 ? parts[1] : lastInvoiceAny.invoice_number.replace(/^\D+/g, '');
+        const lastNum = parseInt(numPart, 10);
+        if (!isNaN(lastNum)) {
+          nextInvoiceNum = lastNum + 1;
+        }
+      } catch (err) {
+        // Ignorar
+      }
+    }
+
+    await prisma.company.update({
+      where: { id: companyId },
+      data: {
+        next_invoice_number: nextInvoiceNum,
+      },
+    });
+
+    return res.status(200).json({ message: 'Modalidad de facturación actualizada y secuencias sincronizadas', invoicing_mode });
   } catch (error: any) {
     console.error('❌ Error al actualizar modalidad de facturación:', error);
     return res.status(500).json({ detail: error.message });

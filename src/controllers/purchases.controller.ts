@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../models/db';
 import { AuthRequest } from '../middlewares/auth';
+import axios from 'axios';
 
 const NCF_TYPE_MAP: Record<string, string> = {
   'Factura de Crédito Fiscal': '01',
@@ -101,3 +102,107 @@ export async function deletePurchase(req: AuthRequest, res: Response) {
     return res.status(500).json({ detail: error.message });
   }
 }
+
+export async function scanPurchaseImage(req: AuthRequest, res: Response) {
+  if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
+  if (!req.file) return res.status(400).json({ detail: 'No se subió ninguna imagen' });
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ detail: 'GEMINI_API_KEY no está configurado en el archivo .env del servidor' });
+  }
+
+  try {
+    const base64Image = req.file.buffer.toString('base64');
+    const mimeType = req.file.mimetype;
+
+    const prompt = `Analiza esta factura de República Dominicana y extrae la información en formato JSON.
+Devuelve obligatoriamente un objeto JSON con esta estructura exacta y completa (asegúrate de cerrar el objeto con } al final):
+{
+  "rnc_proveedor": "RNC del emisor/proveedor de 9 o 11 dígitos sin guiones ni espacios",
+  "nombre_proveedor": "Nombre comercial o razón social del emisor",
+  "ncf": "NCF de la factura (comprobante fiscal que empieza con B o E y tiene 8 o 10 dígitos numéricos)",
+  "fecha": "Fecha de emisión en formato YYYY-MM-DD",
+  "monto_total": 0.0,
+  "itbis": 0.0,
+  "tipo_comprobante": "Código de 2 dígitos de clasificación del gasto del reporte 606 (ej: '02' para trabajos/servicios, '01' para personal, '09' para costo de venta, etc.)"
+}`;
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: base64Image,
+              },
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+      },
+    };
+
+    let response: any = null;
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    while (attempts < maxAttempts) {
+      try {
+        console.log(`🤖 Enviando imagen de factura a Gemini API (Intento ${attempts + 1}/${maxAttempts})...`);
+        response = await axios.post(url, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 25000,
+        });
+        break;
+      } catch (error: any) {
+        attempts++;
+        const is503 = error?.response?.status === 503 || error?.response?.data?.error?.code === 503;
+        if (is503 && attempts < maxAttempts) {
+          console.log('⚠️ Gemini API 503 (Servicio no disponible temporalmente). Reintentando en 2 segundos...');
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    let text = response?.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      throw new Error('Gemini no devolvió texto de respuesta');
+    }
+
+    console.log('🤖 Respuesta de Gemini:', text);
+    text = text.trim();
+
+    // Intentar reparar si falta la llave de cierre al final por truncado
+    if (!text.endsWith('}')) {
+      console.log('⚠️ Detectado JSON truncado. Intentando reparar...');
+      if (text.endsWith('"') || text.match(/\d$/) || text.endsWith('true') || text.endsWith('false') || text.endsWith('null')) {
+        text += '\n}';
+      } else if (text.endsWith(',')) {
+        text = text.slice(0, -1) + '\n}';
+      } else {
+        text += '\n}';
+      }
+      console.log('🤖 JSON Reparado:', text);
+    }
+
+    const parsedData = JSON.parse(text);
+
+    return res.status(200).json(parsedData);
+  } catch (error: any) {
+    console.error('❌ Error en el escaneo con Gemini:', error?.response?.data || error.message);
+    const details = error?.response?.data?.error?.message || error.message;
+    return res.status(500).json({ detail: `Error al procesar la imagen con Gemini: ${details}` });
+  }
+}
+// reload env
