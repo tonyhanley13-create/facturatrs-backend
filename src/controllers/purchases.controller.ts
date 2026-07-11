@@ -160,7 +160,7 @@ Devuelve obligatoriamente un objeto JSON con esta estructura exacta y completa (
           headers: {
             'Content-Type': 'application/json',
           },
-          timeout: 25000,
+          timeout: 45000,
         });
         break;
       } catch (error: any) {
@@ -182,6 +182,13 @@ Devuelve obligatoriamente un objeto JSON con esta estructura exacta y completa (
 
     console.log('🤖 Respuesta de Gemini:', text);
     text = text.trim();
+
+    // Extraer contenido si está envuelto en bloque de código markdown ```json ... ```
+    const markdownRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
+    const match = text.match(markdownRegex);
+    if (match) {
+      text = match[1].trim();
+    }
 
     // Intentar reparar si falta la llave de cierre al final por truncado
     if (!text.endsWith('}')) {
