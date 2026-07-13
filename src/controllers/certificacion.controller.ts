@@ -63,8 +63,8 @@ export async function cancelCertification(req: AuthRequest, res: Response) {
 export async function generateDeclaration(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
   try {
-    const xml = await certService.generateDeclarationXml(req.user.company_id);
-    return res.status(200).json({ success: true, data: { declaration_xml: xml } });
+    const result = await certService.generateDeclarationXml(req.user.company_id);
+    return res.status(200).json({ success: true, data: result });
   } catch (error: any) {
     return res.status(400).json({ detail: error.message });
   }

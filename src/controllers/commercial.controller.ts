@@ -1579,3 +1579,189 @@ export async function getSalesReport(req: AuthRequest, res: Response) {
     return res.status(500).json({ detail: error.message });
   }
 }
+
+export async function getCxcReport(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  try {
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        company_id: req.user.company_id || undefined,
+        payment_status: { in: ['pending', 'partially_paid'] }
+      },
+      include: {
+        client: { select: { id: true, name: true, rnc: true } }
+      },
+      orderBy: { created_at: 'asc' }
+    });
+
+    const filteredInvoices = invoices.filter((inv: any) => {
+      // 1. Excluir anuladas, con error o rechazadas por la DGII
+      if (inv.status === 'voided' || inv.status === 'error' || inv.status === 'rejected_by_dgii') {
+        return false;
+      }
+
+      // 2. Para facturas electrónicas (NCF que empieza con E), excluir borradores (draft)
+      if (inv.ncf && inv.ncf.startsWith('E')) {
+        if (inv.status === 'draft') {
+          return false;
+        }
+      }
+
+      // 3. Excluir facturas de consumo (E31 y B02)
+      if (inv.ncf) {
+        if (inv.ncf.startsWith('E31') || inv.ncf.startsWith('B02')) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    const now = new Date();
+    let totalPending = 0;
+    let range1_15Total = 0;
+    let range16_30Total = 0;
+    let range31_60Total = 0;
+    let range61_90Total = 0;
+    let range90PlusTotal = 0;
+
+    const clientGroups: Record<number, {
+      client_id: number;
+      client_name: string;
+      client_rnc: string;
+      total_pending: number;
+      invoice_count: number;
+      range_1_15: number;
+      range_16_30: number;
+      range_31_60: number;
+      range_61_90: number;
+      range_90_plus: number;
+    }> = {};
+
+    const detailedInvoices = filteredInvoices.map((inv: any) => {
+      const invDate = new Date(inv.created_at);
+      const diffTime = Math.abs(now.getTime() - invDate.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      const amount = Number(inv.total_amount);
+      totalPending += amount;
+
+      let range = '90_plus';
+      if (diffDays <= 15) {
+        range = '1_15';
+        range1_15Total += amount;
+      } else if (diffDays <= 30) {
+        range = '16_30';
+        range16_30Total += amount;
+      } else if (diffDays <= 60) {
+        range = '31_60';
+        range31_60Total += amount;
+      } else if (diffDays <= 90) {
+        range = '61_90';
+        range61_90Total += amount;
+      } else {
+        range90PlusTotal += amount;
+      }
+
+      const clientId = inv.client.id;
+      if (!clientGroups[clientId]) {
+        clientGroups[clientId] = {
+          client_id: clientId,
+          client_name: inv.client.name,
+          client_rnc: inv.client.rnc || '',
+          total_pending: 0,
+          invoice_count: 0,
+          range_1_15: 0,
+          range_16_30: 0,
+          range_31_60: 0,
+          range_61_90: 0,
+          range_90_plus: 0
+        };
+      }
+
+      const cg = clientGroups[clientId];
+      cg.total_pending += amount;
+      cg.invoice_count += 1;
+      
+      if (range === '1_15') cg.range_1_15 += amount;
+      else if (range === '16_30') cg.range_16_30 += amount;
+      else if (range === '31_60') cg.range_31_60 += amount;
+      else if (range === '61_90') cg.range_61_90 += amount;
+      else cg.range_90_plus += amount;
+
+      return {
+        id: inv.id,
+        invoice_number: inv.invoice_number,
+        ncf: inv.ncf ?? '',
+        created_at: inv.created_at.toISOString(),
+        due_date: inv.due_date ? inv.due_date.toISOString() : null,
+        client_name: inv.client.name,
+        client_rnc: inv.client.rnc ?? '',
+        total_amount: amount,
+        days_outstanding: diffDays,
+        aging_range: range
+      };
+    });
+
+    const clientsList = Object.values(clientGroups).sort((a, b) => b.total_pending - a.total_pending);
+
+    return res.status(200).json({
+      summary: {
+        total_pending: totalPending,
+        range_1_15: range1_15Total,
+        range_16_30: range16_30Total,
+        range_31_60: range31_60Total,
+        range_61_90: range61_90Total,
+        range_90_plus: range90PlusTotal
+      },
+      clients: clientsList,
+      invoices: detailedInvoices
+    });
+  } catch (error: any) {
+    console.error('❌ Error en reporte de CxC:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}
+
+export async function registerInvoicePayment(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  const invoiceId = parseInt(req.params.id, 10);
+  if (isNaN(invoiceId)) {
+    return res.status(400).json({ detail: 'ID de factura inválido' });
+  }
+
+  try {
+    const invoice = await prisma.invoice.findFirst({
+      where: {
+        id: invoiceId,
+        company_id: req.user.company_id || undefined,
+      },
+    });
+
+    if (!invoice) {
+      return res.status(404).json({ detail: 'Factura no encontrada' });
+    }
+
+    const updatedInvoice = await prisma.invoice.update({
+      where: { id: invoice.id },
+      data: { payment_status: 'paid' },
+    });
+
+    return res.status(200).json({
+      message: 'Pago registrado exitosamente',
+      invoice: {
+        id: updatedInvoice.id,
+        invoice_number: updatedInvoice.invoice_number,
+        payment_status: updatedInvoice.payment_status,
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ Error al registrar pago de factura:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}

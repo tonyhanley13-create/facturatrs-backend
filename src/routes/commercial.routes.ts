@@ -16,6 +16,8 @@ import {
   getSalesReport,
   getDetailedSalesReport,
   exportSalesReportToExcel,
+  getCxcReport,
+  registerInvoicePayment,
 } from '../controllers/commercial.controller';
 import { authenticateToken, requireSuperAdmin } from '../middlewares/auth';
 
@@ -36,10 +38,12 @@ router.get('/invoices/:id', authenticateToken, getInvoice);
 router.put('/invoices/:id', authenticateToken, updateInvoice);
 router.delete('/invoices/:id', authenticateToken, deleteInvoice);
 router.post('/invoices/with-items', authenticateToken, createInvoiceWithItems);
+router.post('/invoices/:id/pay', authenticateToken, registerInvoicePayment);
 
 router.get('/dashboard', authenticateToken, getDashboardData);
 router.get('/reports/sales', authenticateToken, getSalesReport);
 router.get('/reports/sales/detailed', authenticateToken, getDetailedSalesReport);
 router.get('/reports/sales/excel', authenticateToken, exportSalesReportToExcel);
+router.get('/reports/cxc', authenticateToken, getCxcReport);
 
 export default router;
