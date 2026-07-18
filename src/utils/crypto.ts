@@ -22,20 +22,25 @@ export function encrypt(plaintext: string): string {
 }
 
 export function decrypt(encryptedText: string): string {
-  const parts = encryptedText.split(':');
-  if (parts.length !== 3) return encryptedText;
+  try {
+    const parts = encryptedText.split(':');
+    if (parts.length !== 3) return encryptedText;
 
-  const iv = Buffer.from(parts[0], 'hex');
-  const tag = Buffer.from(parts[1], 'hex');
-  const encrypted = parts[2];
+    const iv = Buffer.from(parts[0], 'hex');
+    const tag = Buffer.from(parts[1], 'hex');
+    const encrypted = parts[2];
 
-  const key = deriveKey();
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
+    const key = deriveKey();
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+    decipher.setAuthTag(tag);
 
-  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (error: any) {
+    console.warn('⚠️ Warning: Failed to decrypt database field. Returning raw value.', error.message);
+    return encryptedText;
+  }
 }
 
 export function isEncrypted(value: string): boolean {
