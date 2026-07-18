@@ -14,17 +14,29 @@ const NCF_TYPE_MAP: Record<string, string> = {
   'Exportación': '10',
 };
 
-const NCF_PREFIX_MAP: Record<string, string> = {
+const ELECTRONIC_PREFIX_MAP: Record<string, string> = {
   'E31': '01', 'E32': '02', 'E33': '03', 'E34': '04',
   'E41': '05', 'E43': '06', 'E44': '07', 'E45': '08',
   'E46': '09', 'E47': '10',
 };
 
+const TRADITIONAL_PREFIX_MAP: Record<string, string> = {
+  'B01': '01', 'B02': '02', 'B03': '03', 'B04': '04',
+  'B11': '11', 'B12': '12', 'B13': '13', 'B14': '14',
+  'B15': '15', 'B16': '16',
+};
+
 function getNcfTypeCode(ncf: string, documentType?: string | null): string {
-  if (documentType && NCF_TYPE_MAP[documentType]) return NCF_TYPE_MAP[documentType];
   if (ncf) {
-    const prefix = ncf.substring(0, 3);
-    if (NCF_PREFIX_MAP[prefix]) return NCF_PREFIX_MAP[prefix];
+    const prefix = ncf.substring(0, 3).toUpperCase();
+    if (prefix.startsWith('B')) {
+      if (TRADITIONAL_PREFIX_MAP[prefix]) return TRADITIONAL_PREFIX_MAP[prefix];
+    } else if (prefix.startsWith('E')) {
+      if (ELECTRONIC_PREFIX_MAP[prefix]) return ELECTRONIC_PREFIX_MAP[prefix];
+    }
+  }
+  if (documentType && NCF_TYPE_MAP[documentType]) {
+    return NCF_TYPE_MAP[documentType];
   }
   return '01';
 }
@@ -109,12 +121,16 @@ export async function generateReport607(companyId: number, year: number, month: 
   const companyRnc = company.rnc ?? '';
   const companyName = company.name ?? '';
 
-  // 607 = Ventas: facturas emitidas a clientes (tradicional y electrónico)
+  // 607 = Ventas: facturas emitidas a clientes (filtradas por estado de transmisión / tradicional)
   const invoices = await prisma.invoice.findMany({
     where: {
       company_id: companyId,
       ncf: { not: null },
-      status: { not: 'draft' },
+      OR: [
+        { dgii_status: { in: ['Aceptado', 'Aceptado Condicional'] } },
+        // Facturas tradicionales (NCF empieza con 'B') no-draft
+        { status: { not: 'draft' }, ncf: { startsWith: 'B' } },
+      ],
       created_at: { gte: startDate, lte: endDate },
     },
     include: { client: true },
