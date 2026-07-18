@@ -96,8 +96,10 @@ export async function sendInvoice(
 
   // 2. Mapear items reales (o crear item sintético si no hay items)
   let dgiiItems: any[];
-  let calculatedTaxedAmount = 0;
   let calculatedExemptAmount = 0;
+
+  // Mapa de tasas ITBIS: { rate: { base, tax } }
+  const itbisBuckets: Record<number, { base: number; tax: number }> = {};
 
   if (invoice.items.length > 0) {
     dgiiItems = invoice.items.map((item, index) => {
@@ -109,14 +111,37 @@ export async function sendInvoice(
       const itemTaxAmount = (subtotal * taxRate) / 100;
 
       if (isItemTaxed) {
-        calculatedTaxedAmount += subtotal;
+        if (!itbisBuckets[taxRate]) {
+          itbisBuckets[taxRate] = { base: 0, tax: 0 };
+        }
+        itbisBuckets[taxRate].base += subtotal;
+        itbisBuckets[taxRate].tax += itemTaxAmount;
       } else {
         calculatedExemptAmount += subtotal;
       }
 
+      // Determinar IndicadorFacturacion
+      let indFact = 1;
+      if (isItemTaxed) {
+        indFact = 1; // Gravado
+      } else {
+        if (item.billing_indicator === 3 || item.billing_indicator === 4) {
+          indFact = item.billing_indicator;
+        } else {
+          const nameLower = (item.item_name || '').toLowerCase();
+          const descLower = (item.description || '').toLowerCase();
+          if (nameLower.includes('transporte') || nameLower.includes('transportacion') ||
+              descLower.includes('transporte') || descLower.includes('transportacion')) {
+            indFact = 4; // Exento (Servicio de Transporte Terrestre)
+          } else {
+            indFact = 4; // Bienes o Servicios Exentos
+          }
+        }
+      }
+
       return {
         NumeroLinea: (index + 1).toString(),
-        IndicadorFacturacion: isItemTaxed ? 1 : 4, // 1 = Gravado, 4 = Exento
+        IndicadorFacturacion: indFact,
         NombreItem: (item.item_name || item.description || 'Producto/Servicio').substring(0, 80),
         IndicadorBienoServicio: Number(item.good_service_indicator) || 1,
         CantidadItem: qty,
@@ -128,14 +153,22 @@ export async function sendInvoice(
     const subtotal = Number(invoice.subtotal);
     const hasTaxAmount = Number(invoice.tax_amount) > 0;
     if (hasTaxAmount) {
-      calculatedTaxedAmount = subtotal;
+      const fallbackRate = 18;
+      itbisBuckets[fallbackRate] = {
+        base: subtotal,
+        tax: Number(invoice.tax_amount),
+      };
     } else {
       calculatedExemptAmount = subtotal;
     }
 
+    const descLower = (invoice.description || '').toLowerCase();
+    const isTransport = descLower.includes('transporte') || descLower.includes('transportacion');
+    const indFact = hasTaxAmount ? 1 : 4; // Exento de ITBIS (Transporte u otros)
+
     dgiiItems = [{
       NumeroLinea: '1',
-      IndicadorFacturacion: hasTaxAmount ? 1 : 4,
+      IndicadorFacturacion: indFact,
       NombreItem: (invoice.description || 'Servicio').substring(0, 80),
       IndicadorBienoServicio: 2,
       CantidadItem: 1,
@@ -144,24 +177,31 @@ export async function sendInvoice(
     }];
   }
 
-  // 3. Construir payload completo
-  const taxTotal = Number(invoice.tax_amount);
+  // 3. Construir totales con soporte de múltiples tasas ITBIS
+  const sortedRates = Object.keys(itbisBuckets).map(Number).sort((a, b) => b - a); // mayor primero
+  const calculatedTaxedAmount = sortedRates.reduce((acc, r) => acc + itbisBuckets[r].base, 0);
+  const taxTotal = sortedRates.reduce((acc, r) => acc + itbisBuckets[r].tax, 0);
 
-  // Construir objeto Totales respetando el orden del esquema e-CF
   const totales: any = {};
   if (calculatedTaxedAmount > 0) {
-    totales.MontoGravadoTotal = calculatedTaxedAmount;
-    totales.MontoGravadoI1 = calculatedTaxedAmount;
+    totales.MontoGravadoTotal = Math.round(calculatedTaxedAmount * 100) / 100;
+  }
+
+  // ITBIS1, ITBIS2, ITBIS3 según orden de tasas (hasta 3 tasas distintas)
+  const rateLabels = ['1', '2', '3'];
+  sortedRates.slice(0, 3).forEach((rate, i) => {
+    const label = rateLabels[i];
+    totales[`MontoGravadoI${label}`] = Math.round(itbisBuckets[rate].base * 100) / 100;
+    totales[`ITBIS${label}`] = rate;
+    totales[`TotalITBIS${label}`] = Math.round(itbisBuckets[rate].tax * 100) / 100;
+  });
+
+  if (taxTotal > 0) {
+    totales.TotalITBIS = Math.round(taxTotal * 100) / 100;
   }
 
   if (calculatedExemptAmount > 0) {
-    totales.MontoExento = calculatedExemptAmount;
-  }
-
-  if (taxTotal > 0) {
-    totales.ITBIS1 = 18; // Tasa
-    totales.TotalITBIS = taxTotal;
-    totales.TotalITBIS1 = taxTotal;
+    totales.MontoExento = Math.round(calculatedExemptAmount * 100) / 100;
   }
 
   totales.MontoTotal = Number(invoice.total_amount);
@@ -191,14 +231,40 @@ export async function sendInvoice(
     idDoc.IndicadorNotaCredito = '0';
   }
   const hasTax = taxTotal > 0;
-  // Basado en ID 19 (E34 aceptada), usaba IndicadorMontoGravado: 1
-  idDoc.IndicadorMontoGravado = (hasTax || isE34) ? 1 : 2; // 1 = Gravado/Mixto, 2 = Exento
+  idDoc.IndicadorMontoGravado = (hasTax || isE34) ? 1 : 2; // 1 = Gravado (con ITBIS), 2 = Exento (sin ITBIS)
   idDoc.TipoIngresos = '01';
   idDoc.TipoPago = isE34 ? 2 : 1;
   if (isE34) {
     idDoc.FechaLimitePago = formatDgiiDate(new Date(Date.now() + 30 * 86400000));
   }
   idDoc.TotalPaginas = 1;
+
+  // Parse client custom fields for export/foreign data
+  let clientExtra: any = {};
+  if (client?.custom_fields) {
+    try { clientExtra = JSON.parse(client.custom_fields); } catch {}
+  }
+
+  const compradorBlock: any = {
+    RNCComprador: rncComprador.replace(/-/g, ''),
+    RazonSocialComprador: (client?.name || 'CLIENTE FINAL').substring(0, 80),
+  };
+
+  // E47 = Exportación, E46 = Pagos al Exterior (comprador no residente)
+  if (ecfType === 47 || ecfType === 46) {
+    if (clientExtra.id_extranjero) {
+      compradorBlock.IdentificadorExtranjero = clientExtra.id_extranjero;
+    }
+    if (clientExtra.tipo_id_extranjero) {
+      compradorBlock.TipoIdExtranjero = clientExtra.tipo_id_extranjero; // 1=Pasaporte, 2=RNC Extranjero, 3=Otro
+    }
+    if (clientExtra.pais_codigo) {
+      compradorBlock.PaisCompradorCodigo = clientExtra.pais_codigo; // ISO 3166-1 alpha-2
+    }
+  }
+  if (ecfType === 47 && clientExtra.puerto_embarque) {
+    compradorBlock.PuertoEmbarque = clientExtra.puerto_embarque;
+  }
 
   const ecfBody: any = {
     Encabezado: {
@@ -210,10 +276,7 @@ export async function sendInvoice(
         DireccionEmisor: (company.address || 'CALLE PRINCIPAL #1').substring(0, 70),
         FechaEmision: todayStr,
       },
-      Comprador: {
-        RNCComprador: rncComprador.replace(/-/g, ''),
-        RazonSocialComprador: (client.name || 'CLIENTE FINAL').substring(0, 80),
-      },
+      Comprador: compradorBlock,
       Totales: totales,
     },
     DetallesItems: {

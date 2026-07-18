@@ -250,6 +250,18 @@ export async function createUser(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: 'ID de empresa inválido' });
     }
 
+    // Validar que el creador tiene permisos de administrador en todas las empresas destino (a menos que sea super admin)
+    if (!req.user.is_super_admin) {
+      for (const cid of companyIds) {
+        const isAdminInCompany = await prisma.userCompany.findFirst({
+          where: { user_id: req.user.id, company_id: cid, role: 'admin' },
+        });
+        if (!isAdminInCompany) {
+          return res.status(403).json({ detail: `No tienes permisos de administrador en la empresa con id ${cid}` });
+        }
+      }
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Crear usuario y vincularlo a la(s) empresa(s) en una transacción

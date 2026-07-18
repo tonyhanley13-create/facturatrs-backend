@@ -4,18 +4,31 @@ import * as receptionService from '../services/dgii-reception.service';
 
 // DGII llama a este endpoint cuando otro emisor nos envía un e-CF
 export async function receiveEcf(req: Request, res: Response) {
+  const rncComprador = req.params.rnc || req.query.rnc as string || '';
   try {
-    const rncComprador = req.params.rnc || req.query.rnc as string || '';
     const xml = typeof req.body === 'string' ? req.body : req.body?.xml || JSON.stringify(req.body);
 
     const result = await receptionService.receiveEcf(xml, rncComprador);
 
-    if (result.status === '0') {
-      return res.status(200).json({ status: result.status, detalle: 'Recibido' });
-    }
-    return res.status(400).json({ status: result.status, codigo: result.code, detalle: result.detail });
+    res.set('Content-Type', 'application/xml');
+    const httpStatus = result.status === '0' ? 200 : 400;
+    return res.status(httpStatus).send(result.xmlResponse);
   } catch (error: any) {
-    return res.status(500).json({ status: '1', codigo: '1', detalle: `Error interno: ${error.message}` });
+    console.error('Error en receptor de e-CF:', error);
+    res.set('Content-Type', 'application/xml');
+    const xmlError = `<?xml version="1.0" encoding="utf-8"?>
+<ARECF>
+  <DetalleAcusedeRecibo>
+    <Version>1.0</Version>
+    <RNCEmisor></RNCEmisor>
+    <RNCComprador>${rncComprador.replace(/-/g, '')}</RNCComprador>
+    <eNCF></eNCF>
+    <Estado>1</Estado>
+    <CodigoMotivoNoRecibido>1</CodigoMotivoNoRecibido>
+    <FechaHoraAcuseRecibo>${new Date().toISOString()}</FechaHoraAcuseRecibo>
+  </DetalleAcusedeRecibo>
+</ARECF>`;
+    return res.status(500).send(xmlError);
   }
 }
 

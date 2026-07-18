@@ -5,6 +5,7 @@ import * as dgiiService from '../services/dgii.service';
 import { saveInvoiceFile } from '../services/storage.service';
 import { getNextNcfNumber, TRADITIONAL_TYPES, getTypeInfo, resolveType, NCF_PREFIXES } from '../services/ncf.service';
 import { generateInvoiceNumber } from './commercial.controller';
+import { validateRnc, validateRncForEcfType } from '../services/rnc-validator.service';
 
 export async function testConnection(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
@@ -287,8 +288,18 @@ export async function transmitInvoice(req: AuthRequest, res: Response) {
     } else {
       encfNumber = await getNextNcfNumber(req.user.company_id, docType);
     }
-    const amount = Number(invoice.total_amount);
+
     const ecfType = parseInt(encfNumber.substring(1, 3), 10);
+
+    // Validar RNC en padrón DGII para tipos que lo requieran
+    const rncValidation = await validateRncForEcfType(client.rnc, ecfType);
+    if (!rncValidation.valid && rncValidation.status !== 'INDETERMINADO' && rncValidation.status !== 'EXENTO_VALIDACION') {
+      return res.status(400).json({
+        detail: `El RNC/Cédula '${client.rnc}' del comprador no es válido o está inactivo en el padrón de la DGII. Razón: ${rncValidation.error || rncValidation.status || 'Contribuyente no activo'}`
+      });
+    }
+
+    const amount = Number(invoice.total_amount);
     const result = await dgiiService.sendInvoice(
       req.user.company_id, invoice.id, encfNumber, company.rnc, client.rnc, amount, company.dgii_environment,
       docType, referenceNcf, modificationCode,
@@ -437,6 +448,43 @@ export async function getCustomerDirectory(req: AuthRequest, res: Response) {
     return res.status(200).json({ success: true, data: result });
   } catch (error: any) {
     return res.status(500).json({ detail: `Error al consultar directorio: ${error.message}` });
+  }
+}
+
+/**
+ * GET /dgii/buyer-type?rnc=xxx
+ * Indica si el comprador es Emisor Electrónico (B2B) o Consumidor Final/Tradicional.
+ * Usa caché en memoria de 1 hora para no saturar la DGII.
+ */
+const _buyerTypeCache = new Map<string, { isElectronic: boolean; name: string; ts: number }>();
+const BUYER_TYPE_TTL = 60 * 60 * 1000; // 1 hora
+
+export async function getBuyerType(req: AuthRequest, res: Response) {
+  if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
+  const rawRnc = (req.query.rnc as string | undefined)?.replaceAll('-', '').trim() ?? '';
+  if (!rawRnc) return res.status(400).json({ detail: 'rnc es requerido' });
+
+  // Revisar caché
+  const cached = _buyerTypeCache.get(rawRnc);
+  if (cached && Date.now() - cached.ts < BUYER_TYPE_TTL) {
+    return res.status(200).json({ rnc: rawRnc, isElectronicIssuer: cached.isElectronic, name: cached.name, fromCache: true });
+  }
+
+  try {
+    const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
+    const dirResult = await dgiiService.getCustomerDirectory(rawRnc, req.user.company_id, company?.dgii_environment);
+
+    // La respuesta del directorio incluye un array de documentTypes o un campo indicando si es emisor electrónico
+    // Cuando no está en el directorio la DGII lanza error o devuelve vacío
+    const isElectronic = !!(dirResult && (dirResult.isElectronic || dirResult.tipoEmision === 'Electronico' || dirResult.eEmisorElectronico));
+    const name: string = dirResult?.nombre ?? dirResult?.name ?? '';
+
+    _buyerTypeCache.set(rawRnc, { isElectronic, name, ts: Date.now() });
+    return res.status(200).json({ rnc: rawRnc, isElectronicIssuer: isElectronic, name, fromCache: false });
+  } catch (error: any) {
+    // Si falla la consulta al directorio (p.ej. RNC no existe), no es emisor electrónico
+    _buyerTypeCache.set(rawRnc, { isElectronic: false, name: '', ts: Date.now() });
+    return res.status(200).json({ rnc: rawRnc, isElectronicIssuer: false, name: '', error: error.message });
   }
 }
 
@@ -637,3 +685,16 @@ export async function getBatchStatus(req: AuthRequest, res: Response) {
     return res.status(500).json({ detail: `Error al consultar lote: ${error.message}` });
   }
 }
+
+export async function validateRncController(req: AuthRequest, res: Response) {
+  if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
+  const { rnc } = req.query as Record<string, string>;
+  if (!rnc) return res.status(400).json({ detail: 'El RNC es requerido' });
+  try {
+    const result = await validateRnc(rnc);
+    return res.status(200).json(result);
+  } catch (error: any) {
+    return res.status(500).json({ detail: `Error al validar RNC: ${error.message}` });
+  }
+}
+

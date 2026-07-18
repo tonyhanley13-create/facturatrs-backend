@@ -6,10 +6,12 @@ const router = Router();
 
 router.post('/generate', authenticateToken, generateReport);
 router.get('/list', authenticateToken, listReports);
-router.get('/:type/:year/:month', authenticateToken, getReport);
+// Rutas específicas PRIMERO para evitar que /:type/:year/:month las intercepte
 router.get('/:type/:year/:month/download', authenticateToken, downloadReportXml);
 router.get('/:type/:year/:month/excel', authenticateToken, downloadReportExcel);
 router.get('/:type/:year/:month/txt', authenticateToken, downloadReportTxt);
+// Ruta genérica AL FINAL
+router.get('/:type/:year/:month', authenticateToken, getReport);
 router.delete('/:id', authenticateToken, deleteReport);
 
 export default router;

@@ -109,7 +109,7 @@ export async function generateReport607(companyId: number, year: number, month: 
   const companyRnc = company.rnc ?? '';
   const companyName = company.name ?? '';
 
-  // 607 = Ventas: facturas emitidas a clientes (incluye tradicional y electrónico)
+  // 607 = Ventas: facturas emitidas a clientes (tradicional y electrónico)
   const invoices = await prisma.invoice.findMany({
     where: {
       company_id: companyId,
@@ -123,16 +123,21 @@ export async function generateReport607(companyId: number, year: number, month: 
 
   const rows = invoices.map((inv) => {
     const ncfType = getNcfTypeCode(inv.ncf || '', inv.document_type);
+    const taxAmount = Number(inv.tax_amount || 0);
+    const totalAmount = Number(inv.total_amount);
     return {
       ncf: inv.ncf || '',
-      rnc: companyRnc,
-      name: inv.client.name,
+      rncCliente: (inv.client.rnc || '').replace(/[^0-9]/g, ''),
+      nombreCliente: inv.client.name,
       date: inv.created_at.toISOString().split('T')[0],
-      amount: Number(inv.total_amount),
+      amount: totalAmount,
+      itbis: taxAmount,
       type: ncfType,
     };
   });
 
+  const totalMonto = rows.reduce((s, r) => s + r.amount, 0);
+  const totalItbis = rows.reduce((s, r) => s + r.itbis, 0);
   const period = `${month.toString().padStart(2, '0')}/${year}`;
 
   let xml = '<?xml version="1.0" encoding="utf-8"?>\n';
@@ -142,15 +147,19 @@ export async function generateReport607(companyId: number, year: number, month: 
   xml += `    <RazonSocial>${xmlEscape(companyName)}</RazonSocial>\n`;
   xml += `    <Periodo>${xmlEscape(period)}</Periodo>\n`;
   xml += `    <CantidadRegistros>${rows.length}</CantidadRegistros>\n`;
+  xml += `    <TotalMontoFacturado>${totalMonto.toFixed(2)}</TotalMontoFacturado>\n`;
+  xml += `    <TotalITBIS>${totalItbis.toFixed(2)}</TotalITBIS>\n`;
   xml += '  </Cabezal>\n';
   xml += '  <Detalles>\n';
 
   for (const row of rows) {
     xml += '    <Detalle>\n';
     xml += `      <NCF>${xmlEscape(row.ncf)}</NCF>\n`;
-    xml += `      <RncEmisor>${xmlEscape(row.rnc)}</RncEmisor>\n`;
+    xml += `      <RncComprador>${xmlEscape(row.rncCliente)}</RncComprador>\n`;
+    xml += `      <NombreComprador>${xmlEscape(row.nombreCliente)}</NombreComprador>\n`;
     xml += `      <Fecha>${row.date}</Fecha>\n`;
     xml += `      <MontoTotal>${row.amount.toFixed(2)}</MontoTotal>\n`;
+    xml += `      <MontoITBIS>${row.itbis.toFixed(2)}</MontoITBIS>\n`;
     xml += `      <TipoComprobante>${row.type}</TipoComprobante>\n`;
     xml += '    </Detalle>\n';
   }
@@ -271,11 +280,15 @@ export async function generateReportExcel(companyId: number, type: string, year:
       { header: 'Monto Total', key: 'monto', width: 18 },
     ];
 
+    // Excel 607: incluye facturas electrónicas aceptadas Y facturas tradicionales emitidas
     const invoices = await prisma.invoice.findMany({
       where: {
         company_id: companyId,
         ncf: { not: null },
-        dgii_status: { in: ['Aceptado', 'Aceptado Condicional'] },
+        OR: [
+          { dgii_status: { in: ['Aceptado', 'Aceptado Condicional'] } },
+          { status: { not: 'draft' }, ncf: { startsWith: 'B' } },
+        ],
         created_at: { gte: startDate, lte: endDate },
       },
       include: { client: true },
@@ -399,11 +412,16 @@ export async function generateReportTxt(companyId: number, type: string, year: n
       lines.push(cols.join('|'));
     }
   } else {
+    // 607 TXT: incluye facturas electrónicas aceptadas Y facturas tradicionales emitidas
     const invoices = await prisma.invoice.findMany({
       where: {
         company_id: companyId,
         ncf: { not: null },
-        dgii_status: { in: ['Aceptado', 'Aceptado Condicional'] },
+        OR: [
+          { dgii_status: { in: ['Aceptado', 'Aceptado Condicional'] } },
+          // Facturas tradicionales (NCF empieza con 'B') no-draft
+          { status: { not: 'draft' }, ncf: { startsWith: 'B' } },
+        ],
         created_at: { gte: startDate, lte: endDate },
       },
       include: { client: true },

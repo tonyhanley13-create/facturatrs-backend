@@ -382,18 +382,8 @@ export async function updateInvoicingMode(req: AuthRequest, res: Response) {
       data,
     });
 
-    // 1. Eliminar secuencias que ya no son válidas para la nueva modalidad
+    // 1. Obtener los tipos de comprobante válidos para la nueva modalidad
     const validTypes = getNcfTypesForMode(invoicing_mode);
-    const existingSeqs = await prisma.ncfSequence.findMany({
-      where: { company_id: companyId },
-    });
-    for (const seq of existingSeqs) {
-      if (!validTypes.includes(seq.type)) {
-        await prisma.ncfSequence.delete({
-          where: { company_id_type: { company_id: companyId, type: seq.type } },
-        });
-      }
-    }
 
     // 2. Para cada tipo válido de la nueva modalidad, inicializar/sincronizar leyendo
     // la última factura emitida en la base de datos para esta empresa
@@ -670,6 +660,7 @@ export async function getInvoice(req: AuthRequest, res: Response) {
       due_date: invoice.due_date?.toISOString(),
       notes: invoice.notes,
       custom_fields: invoice.custom_fields,
+      dgii_error: invoice.dgii_error,
       items: invoice.items.map((item: any) => ({
         id: item.id,
         description: item.description || item.item_name,
@@ -899,6 +890,7 @@ export async function getInvoices(req: AuthRequest, res: Response) {
           return null;
         })(),
         custom_fields: inv.custom_fields,
+        dgii_error: inv.dgii_error,
         items: inv.items.map((item: any) => ({
           id: item.id,
           description: item.description || item.item_name,
@@ -1040,19 +1032,25 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
 
     // Generar NCF automático para comprobantes tradicionales (B01-B04)
     const company = await prisma.company.findUnique({ where: { id: companyId } });
-    if (company && company.invoicing_mode === 'tradicional') {
+    if (company) {
       let docTypeName = 'Factura de Crédito Fiscal';
       try {
         if (custom_fields && typeof custom_fields === 'object') {
           docTypeName = custom_fields.documento_tipo || docTypeName;
         }
       } catch (_) {}
+      
       const traditionalPrefix = resolveTraditionalType(docTypeName);
-      const ncf = await getNextNcfNumber(companyId, traditionalPrefix);
-      await prisma.invoice.update({
-        where: { id: newInvoice.id },
-        data: { ncf, status: 'draft' },
-      });
+      const isTraditionalDoc = ['B01', 'B02', 'B03', 'B04'].includes(traditionalPrefix);
+      
+      // Auto-generar NCF si la empresa es tradicional, o si es transición y el comprobante elegido es tradicional
+      if (company.invoicing_mode === 'tradicional' || (company.invoicing_mode === 'transicion' && isTraditionalDoc)) {
+        const ncf = await getNextNcfNumber(companyId, traditionalPrefix);
+        await prisma.invoice.update({
+          where: { id: newInvoice.id },
+          data: { ncf, status: 'draft' },
+        });
+      }
     }
 
     const finalInvoice = await prisma.invoice.findUnique({ where: { id: newInvoice.id } });
