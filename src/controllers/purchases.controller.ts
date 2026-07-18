@@ -36,7 +36,7 @@ export async function createPurchase(req: AuthRequest, res: Response) {
   if (!ncf || !rnc_proveedor || !nombre_proveedor || !fecha || monto_total == null) {
     return res.status(400).json({ detail: 'ncf, rnc_proveedor, nombre_proveedor, fecha y monto_total son requeridos' });
   }
-  const tipo = tipo_comprobante || NCF_TYPE_MAP[req.body.tipo_comprobante_label || ''] || '01';
+  const tipo = tipo_comprobante || NCF_TYPE_MAP[req.body.tipo_comprobante_label || ''] || '09';
   try {
     const purchase = await prisma.purchaseRecord.create({
       data: {
