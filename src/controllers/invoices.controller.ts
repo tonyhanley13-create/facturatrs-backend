@@ -2,6 +2,8 @@ import { Response } from 'express';
 import prisma from '../models/db';
 import { AuthRequest } from '../middlewares/auth';
 import { Decimal } from '@prisma/client/runtime/library';
+import { generateInvoiceNumber } from './commercial.controller';
+import { getNextNcfNumber } from '../services/ncf.service';
 
 export async function createInvoiceStandard(req: AuthRequest, res: Response) {
   if (!req.user) {
@@ -23,23 +25,9 @@ export async function createInvoiceStandard(req: AuthRequest, res: Response) {
       return res.status(404).json({ detail: 'Cliente no encontrado' });
     }
 
-    // Generar número de factura
-    const lastInvoice = await prisma.invoice.findFirst({
-      where: { company_id: req.user.company_id || undefined },
-      orderBy: { id: 'desc' },
-    });
-    let nextNum = 1;
-    if (lastInvoice) {
-      const parts = lastInvoice.invoice_number.split('-');
-      if (parts.length > 1) {
-        const num = parseInt(parts[1], 10);
-        if (!isNaN(num)) nextNum = num + 1;
-      }
-    }
-    const invoiceNumber = `FACT-${nextNum.toString().padStart(6, '0')}`;
-
-    // Simular envío a Alanube sandbox (como en invoices.py original)
-    const ncf = 'B010000001';
+    const companyId = req.user.company_id || 1;
+    const invoiceNumber = await generateInvoiceNumber(req.user.id, companyId);
+    const ncf = await getNextNcfNumber(companyId, 'B01');
     const status = 'issued';
 
     const invoice = await prisma.invoice.create({

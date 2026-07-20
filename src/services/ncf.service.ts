@@ -50,6 +50,59 @@ export function canTransmitInvoice(mode: string, documentType?: string): boolean
   return true;
 }
 
+export async function getMaxInvoiceNumberFromDb(
+  tx: any,
+  companyId: number
+): Promise<number> {
+  const invoices = await tx.invoice.findMany({
+    where: { company_id: companyId },
+    select: { invoice_number: true },
+  });
+
+  let maxNum = 0;
+  for (const inv of invoices) {
+    if (!inv.invoice_number) continue;
+    try {
+      const parts = inv.invoice_number.split('-');
+      const numPart = parts.length > 1 ? parts[1] : inv.invoice_number.replace(/^\D+/g, '');
+      const parsed = parseInt(numPart, 10);
+      if (!isNaN(parsed) && parsed > maxNum) {
+        maxNum = parsed;
+      }
+    } catch (_) {}
+  }
+
+  return maxNum;
+}
+
+export async function getMaxNcfCorrelativeFromDb(
+  tx: any,
+  companyId: number,
+  type: string
+): Promise<number> {
+  const prefix = NCF_PREFIXES[type] || type;
+
+  const invoices = await tx.invoice.findMany({
+    where: {
+      company_id: companyId,
+      ncf: { startsWith: prefix },
+    },
+    select: { ncf: true },
+  });
+
+  let maxNum = 0;
+  for (const inv of invoices) {
+    if (!inv.ncf) continue;
+    const correlativeStr = inv.ncf.slice(prefix.length);
+    const parsed = parseInt(correlativeStr, 10);
+    if (!isNaN(parsed) && parsed > maxNum) {
+      maxNum = parsed;
+    }
+  }
+
+  return maxNum;
+}
+
 export async function getNextNcfNumber(companyId: number, type: string): Promise<string> {
   const prefix = NCF_PREFIXES[type];
   if (!prefix) throw new Error(`Tipo de NCF inválido: ${type}`);
@@ -58,34 +111,16 @@ export async function getNextNcfNumber(companyId: number, type: string): Promise
     // Advisory lock per company to prevent concurrent NCF generation
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${companyId})`);
 
-    // 1. Buscar el último NCF emitido en la tabla de facturas para este prefijo
-    const lastInvoiceWithNcf = await tx.invoice.findFirst({
-      where: {
-        company_id: companyId,
-        ncf: {
-          startsWith: prefix,
-        },
-      },
-      orderBy: {
-        id: 'desc',
-      },
-    });
+    // 1. Obtener el número máximo correlativo de las facturas ya emitidas para este tipo específico
+    const maxDbNumber = await getMaxNcfCorrelativeFromDb(tx, companyId, type);
+    const nextFromDb = maxDbNumber + 1;
 
-    let lastDbNumber = 0;
-    if (lastInvoiceWithNcf && lastInvoiceWithNcf.ncf) {
-      const correlativeStr = lastInvoiceWithNcf.ncf.slice(prefix.length);
-      const parsedNum = parseInt(correlativeStr, 10);
-      if (!isNaN(parsedNum)) {
-        lastDbNumber = parsedNum;
-      }
-    }
-
-    const nextFromDb = lastDbNumber + 1;
-
-    // 2. Obtener o crear la secuencia
+    // 2. Obtener la secuencia guardada para este tipo
     let seq = await tx.ncfSequence.findUnique({
       where: { company_id_type: { company_id: companyId, type } },
     });
+
+    const safeNext = Math.max(seq?.next || 1, nextFromDb);
 
     if (!seq) {
       seq = await tx.ncfSequence.create({
@@ -93,15 +128,14 @@ export async function getNextNcfNumber(companyId: number, type: string): Promise
           company_id: companyId,
           type,
           prefix,
-          next: nextFromDb,
+          next: safeNext,
           end: 999999,
         },
       });
-    } else if (seq.next < nextFromDb) {
-      // Si la secuencia guardada en base de datos es menor que la última factura emitida, actualizarla
+    } else if (seq.next < safeNext) {
       seq = await tx.ncfSequence.update({
         where: { company_id_type: { company_id: companyId, type } },
-        data: { next: nextFromDb },
+        data: { next: safeNext },
       });
     }
 
@@ -141,19 +175,29 @@ export async function migrateNcfSequences(companyId: number) {
     const type = seq.type || seq.prefix;
     if (!type || !NCF_PREFIXES[type]) continue;
 
+    const maxDbNumber = await getMaxNcfCorrelativeFromDb(prisma, companyId, type);
+    const nextFromDb = maxDbNumber + 1;
+
+    const existing = await prisma.ncfSequence.findUnique({
+      where: { company_id_type: { company_id: companyId, type } },
+    });
+
+    const safeNext = Math.max(existing?.next || 1, Number(seq.next) || 1, nextFromDb);
+    const safeEnd = Math.max(existing?.end || 999999, Number(seq.end) || 999999);
+
     await prisma.ncfSequence.upsert({
       where: { company_id_type: { company_id: companyId, type } },
       create: {
         company_id: companyId,
         type,
         prefix: seq.prefix || type,
-        next: Number(seq.next) || 1,
-        end: Number(seq.end) || 999999,
+        next: safeNext,
+        end: safeEnd,
       },
       update: {
         prefix: seq.prefix || type,
-        next: Number(seq.next) || 1,
-        end: Number(seq.end) || 999999,
+        next: safeNext,
+        end: safeEnd,
       },
     });
   }
@@ -175,10 +219,13 @@ export async function setNcfRange(
   const prefix = NCF_PREFIXES[type];
   if (!prefix) throw new Error(`Tipo de NCF inválido: ${type}`);
 
+  const maxDbNumber = await getMaxNcfCorrelativeFromDb(prisma, companyId, type);
+  const safeNext = Math.max(next, maxDbNumber + 1);
+
   return prisma.ncfSequence.upsert({
     where: { company_id_type: { company_id: companyId, type } },
-    create: { company_id: companyId, type, prefix, next, end },
-    update: { next, end },
+    create: { company_id: companyId, type, prefix, next: safeNext, end },
+    update: { next: safeNext, end },
   });
 }
 

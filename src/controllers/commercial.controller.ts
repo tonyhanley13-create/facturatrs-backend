@@ -4,7 +4,7 @@ import { AuthRequest } from '../middlewares/auth';
 import { Decimal } from '@prisma/client/runtime/library';
 import * as ExcelJS from 'exceljs';
 import { logInvoiceAction } from '../services/audit.service';
-import { getNcfTypesForMode, getNextNcfNumber, resolveTraditionalType, migrateNcfSequences, NCF_PREFIXES } from '../services/ncf.service';
+import { getNcfTypesForMode, getNextNcfNumber, resolveTraditionalType, migrateNcfSequences, NCF_PREFIXES, getMaxNcfCorrelativeFromDb, getMaxInvoiceNumberFromDb } from '../services/ncf.service';
 
 // ==========================================
 // HELPER FUNCTIONS FOR LIMITS & LOGS
@@ -113,27 +113,8 @@ export async function generateInvoiceNumber(userId: number, companyId: number): 
   });
 
   const prefix = company?.invoice_prefix || 'FACT-';
-  let nextNum = company?.next_invoice_number || 1;
-
-  const lastInvoice = await prisma.invoice.findFirst({
-    where: {
-      company_id: companyId,
-    },
-    orderBy: { id: 'desc' },
-  });
-
-  if (lastInvoice && lastInvoice.invoice_number) {
-    try {
-      const parts = lastInvoice.invoice_number.split('-');
-      const numPart = parts.length > 1 ? parts[1] : lastInvoice.invoice_number.replace(/^\D+/g, '');
-      const lastNum = parseInt(numPart, 10);
-      if (!isNaN(lastNum) && lastNum >= nextNum) {
-        nextNum = lastNum + 1;
-      }
-    } catch (err) {
-      // Ignorar error de parsing
-    }
-  }
+  const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, companyId);
+  const nextNum = Math.max(company?.next_invoice_number || 1, maxDbInvoiceNum + 1);
 
   // Actualizar next_invoice_number en Company para mantener la consistencia
   await prisma.company.update({
@@ -322,6 +303,12 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
 
     // También guardar rangos NCF y numeración en Company (per-company)
     if (req.user.company_id) {
+      let safeNextInvoiceNum: number | undefined = undefined;
+      if (next_invoice_number !== undefined) {
+        const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, req.user.company_id);
+        safeNextInvoiceNum = Math.max(Number(next_invoice_number), maxDbInvoiceNum + 1);
+      }
+
       await prisma.company.update({
         where: { id: req.user.company_id },
         data: {
@@ -331,7 +318,7 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
           phone: company_phone !== undefined ? company_phone : undefined,
           email: company_email !== undefined ? company_email : undefined,
           ncf_ranges: client_custom_fields !== undefined ? JSON.stringify(client_custom_fields) : undefined,
-          next_invoice_number: next_invoice_number !== undefined ? next_invoice_number : undefined,
+          next_invoice_number: safeNextInvoiceNum,
           invoice_prefix: invoice_prefix !== undefined ? invoice_prefix : undefined,
           logo_url: logo_url !== undefined ? logo_url : undefined,
         },
@@ -386,40 +373,20 @@ export async function updateInvoicingMode(req: AuthRequest, res: Response) {
     const validTypes = getNcfTypesForMode(invoicing_mode);
 
     // 2. Para cada tipo válido de la nueva modalidad, inicializar/sincronizar leyendo
-    // la última factura emitida en la base de datos para esta empresa
+    // la última factura emitida en la base de datos para este tipo específico
     for (const type of validTypes) {
       const prefix = NCF_PREFIXES[type];
       if (!prefix) continue;
 
-      const lastInvoice = await prisma.invoice.findFirst({
-        where: {
-          company_id: companyId,
-          ncf: {
-            startsWith: prefix,
-          },
-        },
-        orderBy: {
-          id: 'desc',
-        },
-      });
-
-      let lastDbNumber = 0;
-      if (lastInvoice && lastInvoice.ncf) {
-        const correlativeStr = lastInvoice.ncf.slice(prefix.length);
-        const parsedNum = parseInt(correlativeStr, 10);
-        if (!isNaN(parsedNum)) {
-          lastDbNumber = parsedNum;
-        }
-      }
-
-      const nextFromDb = lastDbNumber + 1;
+      const maxDbNumber = await getMaxNcfCorrelativeFromDb(prisma, companyId, type);
+      const nextFromDb = maxDbNumber + 1;
 
       // Buscar si ya existe la secuencia en la BD
       const existing = await prisma.ncfSequence.findUnique({
         where: { company_id_type: { company_id: companyId, type } },
       });
 
-      const finalNext = existing ? Math.max(existing.next, nextFromDb) : nextFromDb;
+      const safeNext = Math.max(existing?.next || 1, nextFromDb);
 
       await prisma.ncfSequence.upsert({
         where: { company_id_type: { company_id: companyId, type } },
@@ -427,39 +394,24 @@ export async function updateInvoicingMode(req: AuthRequest, res: Response) {
           company_id: companyId,
           type,
           prefix,
-          next: finalNext,
+          next: safeNext,
           end: 999999,
         },
         update: {
-          next: finalNext,
+          next: safeNext,
         },
       });
     }
 
     // 3. Sincronizar también el siguiente número de factura (next_invoice_number) de la empresa
-    const lastInvoiceAny = await prisma.invoice.findFirst({
-      where: { company_id: companyId },
-      orderBy: { id: 'desc' },
-    });
-
-    let nextInvoiceNum = 1;
-    if (lastInvoiceAny && lastInvoiceAny.invoice_number) {
-      try {
-        const parts = lastInvoiceAny.invoice_number.split('-');
-        const numPart = parts.length > 1 ? parts[1] : lastInvoiceAny.invoice_number.replace(/^\D+/g, '');
-        const lastNum = parseInt(numPart, 10);
-        if (!isNaN(lastNum)) {
-          nextInvoiceNum = lastNum + 1;
-        }
-      } catch (err) {
-        // Ignorar
-      }
-    }
+    const companyObj = await prisma.company.findUnique({ where: { id: companyId } });
+    const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, companyId);
+    const safeInvoiceNum = Math.max(companyObj?.next_invoice_number || 1, maxDbInvoiceNum + 1);
 
     await prisma.company.update({
       where: { id: companyId },
       data: {
-        next_invoice_number: nextInvoiceNum,
+        next_invoice_number: safeInvoiceNum,
       },
     });
 
