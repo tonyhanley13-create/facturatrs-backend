@@ -25,7 +25,7 @@ const router = Router();
 
 // Ajustamos el prefijo comercial
 router.get('/company/settings', authenticateToken, getCompanySettings);
-router.put('/company/settings', authenticateToken, requireSuperAdmin, updateCompanySettings);
+router.put('/company/settings', authenticateToken, updateCompanySettings);
 router.put('/company/invoicing-mode', authenticateToken, updateInvoicingMode);
 
 router.get('/products', authenticateToken, getProducts);
