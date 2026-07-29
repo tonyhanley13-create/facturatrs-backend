@@ -42,12 +42,12 @@ function generateDynamicScannedRows(seedText: string): OcrParsedRow[] {
     'Plaza Lama, SA',
   ];
 
-  // Extract a full report sheet of 12 to 25 invoices per scanned page
-  const count = 12 + (hash % 14);
+  // Extract a full report sheet of 33 invoices per scanned page/photo
+  const count = 33;
   const rows: OcrParsedRow[] = [];
 
-  const baseDay = 1 + (hash % 15);
-  const baseMonth = 1 + (hash % 11);
+  const baseDay = 1 + (hash % 10);
+  const baseMonth = 1 + (hash % 8);
   const year = 2026;
 
   for (let i = 0; i < count; i++) {
