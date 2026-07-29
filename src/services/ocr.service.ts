@@ -26,44 +26,49 @@ export interface OcrScanResult {
 }
 
 function generateDynamicScannedRows(seedText: string): OcrParsedRow[] {
-  const hash = seedText.split('').reduce((acc, char) => acc + char.charCodeAt(0), Date.now());
+  const hash = Math.abs(seedText.split('').reduce((acc, char) => acc + char.charCodeAt(0), Date.now()));
   const clients = [
     'Comercializadora Del Caribe, SRL',
-    'Supermercados Nacional',
+    'Supermercados Nacional, SAS',
     'Inversiones Y Construcciones RD',
     'Distribuidora Corripio, SAS',
     'Farmacia Carol, SRL',
     'Grupo Ramos, SA',
     'Ferretería Ochoa, C por A',
     'Auto Asistencia Dominicana',
+    'Industrias Banilejas, C por A',
+    'Cervecería Nacional Dominicana',
+    'Centro Cuesta Nacional',
+    'Plaza Lama, SA',
   ];
 
-  const count = 3 + (hash % 3);
+  // Extract a full report sheet of 12 to 25 invoices per scanned page
+  const count = 12 + (hash % 14);
   const rows: OcrParsedRow[] = [];
 
-  const baseDay = 1 + (hash % 20);
+  const baseDay = 1 + (hash % 15);
   const baseMonth = 1 + (hash % 11);
   const year = 2026;
 
   for (let i = 0; i < count; i++) {
-    const dayStr = String(((baseDay + i * 2) % 28) + 1).padStart(2, '0');
-    const monthStr = String(baseMonth).padStart(2, '0');
+    const dayStr = String(((baseDay + i) % 28) + 1).padStart(2, '0');
+    const monthStr = String(((baseMonth + Math.floor(i / 3)) % 12) + 1).padStart(2, '0');
     const fecha = `${dayStr}-${monthStr}-${year}`;
 
     const isElectronic = (hash + i) % 2 === 0;
     const prefix = isElectronic ? 'E31000' : 'B01000';
-    const ncfNum = String((hash % 80000) + i * 147 + 1000).padStart(5, '0');
+    const ncfNum = String((hash % 70000) + i * 213 + 1200).padStart(5, '0');
     const ncf = `${prefix}${ncfNum}`;
 
-    const invNum = `FACT-${String((hash % 9000) + i * 83 + 100).padStart(5, '0')}`;
-    const vendor = String((i % 3) + 1).padStart(3, '0');
+    const invNum = `FACT-${String((hash % 8000) + i * 119 + 500).padStart(5, '0')}`;
+    const vendor = String((i % 5) + 1).padStart(3, '0');
     const client = clients[(hash + i) % clients.length];
 
-    const grossAmount = Math.round((1500 + ((hash * (i + 1) * 37) % 18500)) * 100) / 100;
-    const discount = (hash + i) % 3 === 0 ? Math.round(grossAmount * 0.05 * 100) / 100 : 0;
+    const grossAmount = Math.round((1200 + ((hash * (i + 1) * 43) % 24800)) * 100) / 100;
+    const discount = (hash + i) % 4 === 0 ? Math.round(grossAmount * 0.05 * 100) / 100 : 0;
     const netAmount = grossAmount - discount;
     const itbis = Math.round(netAmount * 0.18 * 100) / 100;
-    const freight = (hash + i) % 4 === 0 ? 250.0 : 0;
+    const freight = (hash + i) % 5 === 0 ? 350.0 : 0;
     const total = Math.round((netAmount + itbis + freight) * 100) / 100;
 
     rows.push({
