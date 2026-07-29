@@ -22,18 +22,20 @@ export async function performAiVisionOcr(imageBuffer: Buffer, mimeType: string =
       },
     };
 
-    const prompt = `Analiza la imagen de este reporte impreso de ventas o comprobantes fiscales en República Dominicana (Diario de Ventas NCF).
-Extrae cada una de las filas impresas en formato de texto plano estructurado (una fila por línea):
+    const prompt = `Analiza detenidamente la foto o imagen de este documento o reporte de ventas / comprobantes fiscales (Diario de Ventas NCF) en República Dominicana.
+IMPORTANTE: Si la imagen o la hoja impresa están rotadas, giradas de lado (90°, 180°, 270°) o en cualquier orientación, léela correctamente sin importar la inclinación.
+
+Extrae todas y cada una de las filas de comprobantes impresas en formato de texto estructurado de 5 columnas separadas por espacio (una fila por línea):
 FECHA NCF MONTO_BRUTO ITBIS TOTAL
 
 Ejemplo de salida por línea:
-10-01-2021 B0100116254 2622.88 472.11 3094.99
+10-01-2022 B0100116254 2622.88 472.11 3094.99
 
-Reglas estrictas:
-1. Extrae las fechas reales impresas (ej. 2021 o 2022).
-2. Extrae los NCF reales impresos que inician con B01, B02, B14, B15, etc.
-3. Extrae los montos numéricos exactos de Monto Bruto e ITBIS.
-4. Devuelve únicamente las líneas de datos estructurados separadas por espacio.`;
+Reglas de extracción:
+1. Lee las fechas exactas impresas en el documento (ej. DD-MM-YYYY).
+2. Lee los NCF exactos impresos (ej. B0100116254, B0100116542, etc.).
+3. Lee los valores numéricos exactos de MONTO BRUTO e ITBIS impresos.
+4. No omitas ninguna fila del documento. Devuelve únicamente las líneas de datos estructurados.`;
 
     const result = await model.generateContent([prompt, imagePart]);
     const text = result.response.text();
