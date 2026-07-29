@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1073.0",
+    "@google/generative-ai": "^0.24.1",
     "@prisma/client": "^5.10.0",
     "axios": "^1.6.7",
     "bcryptjs": "^2.4.3",
@@ -38,7 +39,8 @@
     "mssql": "^12.5.5",
     "multer": "^2.2.0",
     "pdfkit": "^0.19.1",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

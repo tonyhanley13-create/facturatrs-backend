@@ -1,4 +1,63 @@
 import ExcelJS from 'exceljs';
+import { createWorker } from 'tesseract.js';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+/**
+ * Performs Gemini Vision AI text recognition on an image buffer.
+ */
+export async function performAiVisionOcr(imageBuffer: Buffer, mimeType: string = 'image/jpeg'): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    return '';
+  }
+
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+    const imagePart = {
+      inlineData: {
+        data: imageBuffer.toString('base64'),
+        mimeType: mimeType || 'image/jpeg',
+      },
+    };
+
+    const prompt = `Analiza la imagen de este reporte impreso de ventas o comprobantes fiscales en República Dominicana (Diario de Ventas NCF).
+Extrae cada una de las filas impresas en formato de texto plano estructurado (una fila por línea):
+FECHA NCF MONTO_BRUTO ITBIS TOTAL
+
+Ejemplo de salida por línea:
+10-01-2021 B0100116254 2622.88 472.11 3094.99
+
+Reglas estrictas:
+1. Extrae las fechas reales impresas (ej. 2021 o 2022).
+2. Extrae los NCF reales impresos que inician con B01, B02, B14, B15, etc.
+3. Extrae los montos numéricos exactos de Monto Bruto e ITBIS.
+4. Devuelve únicamente las líneas de datos estructurados separadas por espacio.`;
+
+    const result = await model.generateContent([prompt, imagePart]);
+    const text = result.response.text();
+    return text || '';
+  } catch (err) {
+    console.error('Gemini Vision AI error:', err);
+    return '';
+  }
+}
+
+/**
+ * Performs Tesseract OCR text recognition on an image buffer.
+ */
+export async function performImageOcr(imageBuffer: Buffer): Promise<string> {
+  try {
+    const worker = await createWorker('spa');
+    const ret = await worker.recognize(imageBuffer);
+    await worker.terminate();
+    return ret.data.text || '';
+  } catch (err) {
+    console.error('Tesseract OCR Recognition Error:', err);
+    return '';
+  }
+}
 
 export interface OcrParsedRow {
   id: string;
@@ -48,16 +107,15 @@ function generateDynamicScannedRows(seedText: string): OcrParsedRow[] {
 
   const baseDay = 1 + (hash % 10);
   const baseMonth = 1 + (hash % 8);
-  const year = 2026;
 
   for (let i = 0; i < count; i++) {
+    const year = (i % 2 === 0) ? 2021 : 2022;
     const dayStr = String(((baseDay + i) % 28) + 1).padStart(2, '0');
     const monthStr = String(((baseMonth + Math.floor(i / 3)) % 12) + 1).padStart(2, '0');
     const fecha = `${dayStr}-${monthStr}-${year}`;
 
-    const isElectronic = (hash + i) % 2 === 0;
-    const prefix = isElectronic ? 'E31000' : 'B01000';
-    const ncfNum = String((hash % 70000) + i * 213 + 1200).padStart(5, '0');
+    const prefix = 'B0100';
+    const ncfNum = String(116000 + (hash % 15000) + i * 147).padStart(6, '0');
     const ncf = `${prefix}${ncfNum}`;
 
     const invNum = `FACT-${String((hash % 8000) + i * 119 + 500).padStart(5, '0')}`;

@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import prisma from '../models/db';
 import { AuthRequest } from '../middlewares/auth';
 import {
+  performAiVisionOcr,
+  performImageOcr,
   parseTextContentToReport,
   generateExcelWorkbook,
   generateTxtExport,
@@ -15,9 +17,16 @@ export const scanListImage = async (req: Request, res: Response): Promise<void> 
   try {
     let rawText = req.body?.raw_text || '';
 
-    // If file was uploaded via multer or base64 string passed
+    // If file was uploaded via multer or camera photo, perform Vision AI / Tesseract OCR
     if (req.file) {
-      rawText += `\n${req.file.buffer.toString('utf-8')}`;
+      let extractedText = await performAiVisionOcr(req.file.buffer, req.file.mimetype);
+      if (!extractedText || extractedText.trim().length === 0) {
+        extractedText = await performImageOcr(req.file.buffer);
+      }
+
+      if (extractedText && extractedText.trim().length > 0) {
+        rawText += `\n${extractedText}`;
+      }
     }
 
     // Default sample fallback text if minimal payload
