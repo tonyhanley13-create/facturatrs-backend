@@ -1,4 +1,6 @@
 import { Request, Response } from 'express';
+import prisma from '../models/db';
+import { AuthRequest } from '../middlewares/auth';
 import {
   parseTextContentToReport,
   generateExcelWorkbook,
@@ -84,5 +86,144 @@ export const exportToTxt = async (req: Request, res: Response): Promise<void> =>
   } catch (error: any) {
     console.error('Error generating TXT file:', error);
     res.status(500).json({ error: error.message || 'Error al generar archivo TXT' });
+  }
+};
+
+/**
+ * Gets all saved OCR documents for the current company across devices.
+ */
+export const getSavedDocuments = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const companyId = req.user?.company_id;
+    if (!companyId) {
+      res.status(400).json({ error: 'Empresa no especificada' });
+      return;
+    }
+
+    const docs = await prisma.ocrDocument.findMany({
+      where: { company_id: companyId },
+      orderBy: { created_at: 'desc' },
+    });
+
+    const data = docs.map((d) => ({
+      id: d.id,
+      customName: d.custom_name,
+      fileName: d.file_name,
+      companyName: (d.scan_result as any)?.company_name || 'Empresa',
+      dateRange: (d.scan_result as any)?.date_range || '',
+      scanResult: d.scan_result,
+      savedAt: d.created_at.toISOString(),
+    }));
+
+    res.json({ success: true, data });
+  } catch (error: any) {
+    console.error('Error fetching saved OCR documents:', error);
+    res.status(500).json({ error: error.message || 'Error al obtener documentos guardados' });
+  }
+};
+
+/**
+ * Saves a new OCR document to the database for the current company.
+ */
+export const saveDocument = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const companyId = req.user?.company_id;
+    const userId = req.user?.id;
+    if (!companyId || !userId) {
+      res.status(400).json({ error: 'Usuario o Empresa no especificada' });
+      return;
+    }
+
+    const { customName, fileName, scanResult } = req.body;
+    if (!customName || !scanResult) {
+      res.status(400).json({ error: 'Datos incompletos para guardar documento' });
+      return;
+    }
+
+    const newDoc = await prisma.ocrDocument.create({
+      data: {
+        company_id: companyId,
+        custom_name: customName,
+        file_name: fileName || null,
+        scan_result: scanResult,
+        created_by: userId,
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        id: newDoc.id,
+        customName: newDoc.custom_name,
+        fileName: newDoc.file_name,
+        companyName: (newDoc.scan_result as any)?.company_name || 'Empresa',
+        dateRange: (newDoc.scan_result as any)?.date_range || '',
+        scanResult: newDoc.scan_result,
+        savedAt: newDoc.created_at.toISOString(),
+      },
+    });
+  } catch (error: any) {
+    console.error('Error saving OCR document:', error);
+    res.status(500).json({ error: error.message || 'Error al guardar documento' });
+  }
+};
+
+/**
+ * Renames a saved OCR document in the database.
+ */
+export const renameDocument = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const companyId = req.user?.company_id;
+    const { id } = req.params;
+    const { customName } = req.body;
+
+    if (!id || !customName) {
+      res.status(400).json({ error: 'ID y nuevo nombre requeridos' });
+      return;
+    }
+
+    const updated = await prisma.ocrDocument.updateMany({
+      where: { id, company_id: companyId },
+      data: { custom_name: customName },
+    });
+
+    if (updated.count === 0) {
+      res.status(404).json({ error: 'Documento no encontrado' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Documento renombrado correctamente' });
+  } catch (error: any) {
+    console.error('Error renaming OCR document:', error);
+    res.status(500).json({ error: error.message || 'Error al renombrar documento' });
+  }
+};
+
+/**
+ * Deletes a saved OCR document from the database.
+ */
+export const deleteDocument = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const companyId = req.user?.company_id;
+    const { id } = req.params;
+
+    if (!id) {
+      res.status(400).json({ error: 'ID requerido' });
+      return;
+    }
+
+    const deleted = await prisma.ocrDocument.deleteMany({
+      where: { id, company_id: companyId },
+    });
+
+    if (deleted.count === 0) {
+      res.status(404).json({ error: 'Documento no encontrado' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Documento eliminado correctamente' });
+  } catch (error: any) {
+    console.error('Error deleting OCR document:', error);
+    res.status(500).json({ error: error.message || 'Error al eliminar documento' });
   }
 };

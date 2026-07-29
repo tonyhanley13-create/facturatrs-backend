@@ -26,6 +26,7 @@ model User {
   invoices        Invoice[]
   products        ProductService[]
   analytics       UsageAnalytics[]
+  ocrDocuments    OcrDocument[]
 
   @@map("usuarios")
 }
@@ -70,6 +71,7 @@ model Company {
   certificationProgress  CertificationProgress?
   dgiiReports            DgiiReport[]
   purchaseRecords        PurchaseRecord[]
+  ocrDocuments           OcrDocument[]
 
   @@map("empresas")
 }
@@ -405,4 +407,20 @@ model InvoiceAuditLog {
   created_at     DateTime @default(now()) @map("fecha_creacion")
 
   @@map("auditoria_facturas")
+}
+
+model OcrDocument {
+  id            String   @id @default(uuid()) @map("id")
+  company_id    Int      @map("id_empresa")
+  custom_name   String   @map("nombre_personalizado") @db.VarChar(255)
+  file_name     String?  @map("nombre_archivo") @db.VarChar(255)
+  scan_result   Json     @map("resultado_escaneo")
+  created_by    Int      @map("creado_por")
+  created_at    DateTime @default(now()) @map("fecha_creacion")
+  updated_at    DateTime @updatedAt @map("fecha_actualizacion")
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [created_by], references: [id], onDelete: Cascade)
+
+  @@map("ocr_documentos")
 }
