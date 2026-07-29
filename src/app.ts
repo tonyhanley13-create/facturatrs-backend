@@ -19,6 +19,7 @@ import storageRoutes from './routes/storage.routes';
 import dgiiReportRoutes from './routes/dgii-report.routes';
 import purchasesRoutes from './routes/purchases.routes';
 import consultaRoutes from './routes/consulta.routes';
+import ocrRoutes from './routes/ocr.routes';
 
 const app = express();
 
@@ -68,6 +69,8 @@ app.use('/storage', storageRoutes);
 app.use('/dgii/reports', dgiiReportRoutes);
 app.use('/purchases', purchasesRoutes);
 app.use('/consulta', consultaRoutes);
+app.use('/ocr', ocrRoutes);
+app.use('/api/ocr', ocrRoutes);
 
 // Endpoint de Salud
 app.get('/health', (req, res) => {
