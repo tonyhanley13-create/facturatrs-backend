@@ -277,7 +277,7 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
   const worksheet = workbook.addWorksheet('Diario de Ventas');
 
   // Title Banner
-  worksheet.mergeCells('A1:J1');
+  worksheet.mergeCells('A1:E1');
   const titleCell = worksheet.getCell('A1');
   titleCell.value = `${scanResult.company_name} - ${scanResult.title}`;
   titleCell.font = { name: 'Arial', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
@@ -286,7 +286,7 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
   worksheet.getRow(1).height = 32;
 
   // Date range & Subtitle
-  worksheet.mergeCells('A2:J2');
+  worksheet.mergeCells('A2:E2');
   const subCell = worksheet.getCell('A2');
   subCell.value = `${scanResult.date_range} | ${scanResult.client_filter || ''}`;
   subCell.font = { name: 'Arial', size: 10, italic: true, color: { argb: 'FF475569' } };
@@ -297,7 +297,7 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
   worksheet.getRow(3).height = 10;
 
   // Table Headers
-  const headers = ['FECHA', 'N.C.F', 'FACTURA NO.', 'VEN', 'CLIENTE', 'MONTO BRUTO', 'DESCUENTO', 'ITBIS', 'FLETE', 'TOTAL'];
+  const headers = ['FECHA', 'N.C.F', 'MONTO BRUTO', 'ITBIS', 'TOTAL'];
   const headerRow = worksheet.getRow(4);
   headerRow.values = headers;
   headerRow.height = 24;
@@ -306,7 +306,7 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
     const cell = headerRow.getCell(colIdx + 1);
     cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
-    cell.alignment = { horizontal: colIdx >= 5 ? 'right' : 'left', vertical: 'middle' };
+    cell.alignment = { horizontal: colIdx >= 2 ? 'right' : 'left', vertical: 'middle' };
     cell.border = {
       top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
       bottom: { style: 'medium', color: { argb: 'FF0F172A' } },
@@ -320,26 +320,21 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
     row.values = [
       r.fecha,
       r.ncf,
-      r.invoice_number,
-      r.vendor,
-      r.client,
       r.gross_amount,
-      r.discount,
       r.itbis,
-      r.freight,
       r.total,
     ];
     row.height = 20;
 
     // Formatting
-    for (let c = 1; c <= 10; c++) {
+    for (let c = 1; c <= 5; c++) {
       const cell = row.getCell(c);
       cell.font = { name: 'Arial', size: 9 };
       cell.border = {
         bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
       };
 
-      if (c >= 6) {
+      if (c >= 3) {
         cell.numFmt = '#,##0.00';
         cell.alignment = { horizontal: 'right' };
       } else {
@@ -353,15 +348,13 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
   const totalRow = worksheet.getRow(totalRowIdx);
   totalRow.height = 24;
   totalRow.getCell(1).value = 'TOTALES';
-  totalRow.getCell(6).value = { formula: `SUM(F${startRowIdx}:F${totalRowIdx - 1})` };
-  totalRow.getCell(7).value = { formula: `SUM(G${startRowIdx}:G${totalRowIdx - 1})` };
-  totalRow.getCell(8).value = { formula: `SUM(H${startRowIdx}:H${totalRowIdx - 1})` };
-  totalRow.getCell(9).value = { formula: `SUM(I${startRowIdx}:I${totalRowIdx - 1})` };
-  totalRow.getCell(10).value = { formula: `SUM(J${startRowIdx}:J${totalRowIdx - 1})` };
+  totalRow.getCell(3).value = { formula: `SUM(C${startRowIdx}:C${totalRowIdx - 1})` };
+  totalRow.getCell(4).value = { formula: `SUM(D${startRowIdx}:D${totalRowIdx - 1})` };
+  totalRow.getCell(5).value = { formula: `SUM(E${startRowIdx}:E${totalRowIdx - 1})` };
 
-  worksheet.mergeCells(`A${totalRowIdx}:E${totalRowIdx}`);
+  worksheet.mergeCells(`A${totalRowIdx}:B${totalRowIdx}`);
 
-  for (let c = 1; c <= 10; c++) {
+  for (let c = 1; c <= 5; c++) {
     const cell = totalRow.getCell(c);
     cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF0F172A' } };
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEDF2F7' } };
@@ -369,7 +362,7 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
       top: { style: 'medium', color: { argb: 'FF0F172A' } },
       bottom: { style: 'double', color: { argb: 'FF0F172A' } },
     };
-    if (c >= 6) {
+    if (c >= 3) {
       cell.numFmt = '#,##0.00';
       cell.alignment = { horizontal: 'right' };
     } else {
@@ -380,15 +373,10 @@ export async function generateExcelWorkbook(scanResult: OcrScanResult): Promise<
   // Adjust column widths
   worksheet.columns = [
     { width: 14 }, // Fecha
-    { width: 16 }, // NCF
-    { width: 18 }, // Factura No
-    { width: 8 },  // Ven
-    { width: 32 }, // Cliente
-    { width: 15 }, // Monto Bruto
-    { width: 12 }, // Descuento
-    { width: 12 }, // ITBIS
-    { width: 10 }, // Flete
-    { width: 15 }, // Total
+    { width: 18 }, // NCF
+    { width: 16 }, // Monto Bruto
+    { width: 14 }, // ITBIS
+    { width: 16 }, // Total
   ];
 
   const buffer = await workbook.xlsx.writeBuffer();
@@ -410,20 +398,15 @@ export function generateTxtExport(scanResult: OcrScanResult, delimiter: 'tab' | 
   lines.push('');
 
   // Table Headers
-  lines.push(['FECHA', 'NCF', 'FACTURA_NO', 'VEN', 'CLIENTE', 'MONTO_BRUTO', 'DESCUENTO', 'ITBIS', 'FLETE', 'TOTAL'].join(sep));
+  lines.push(['FECHA', 'NCF', 'MONTO_BRUTO', 'ITBIS', 'TOTAL'].join(sep));
 
   // Rows
   for (const r of scanResult.rows) {
     lines.push([
       r.fecha,
       r.ncf,
-      r.invoice_number,
-      r.vendor,
-      r.client,
       r.gross_amount.toFixed(2),
-      r.discount.toFixed(2),
       r.itbis.toFixed(2),
-      r.freight.toFixed(2),
       r.total.toFixed(2),
     ].join(sep));
   }
