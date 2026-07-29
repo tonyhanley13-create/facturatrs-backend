@@ -267,7 +267,7 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { required_client_fields, client_custom_fields, invoice_template, currency, tax_rate, company_name, company_rnc, company_address, company_email, company_phone, next_invoice_number, invoice_prefix, logo_url } = req.body;
+  const { required_client_fields, client_custom_fields, invoice_template, currency, tax_rate, company_name, company_rnc, company_address, company_email, company_phone, next_invoice_number, invoice_prefix, logo_url, monthly_invoice_limit } = req.body;
 
   try {
     let settings = await prisma.companySettings.findFirst({
@@ -297,6 +297,7 @@ export async function updateCompanySettings(req: AuthRequest, res: Response) {
         invoice_template: invoice_template !== undefined ? invoice_template : settings.invoice_template,
         default_currency: currency !== undefined ? currency : settings.default_currency,
         tax_percentage: tax_rate !== undefined ? new Decimal(tax_rate) : settings.tax_percentage,
+        monthly_invoice_limit: monthly_invoice_limit !== undefined ? Number(monthly_invoice_limit) : settings.monthly_invoice_limit,
         updated_at: new Date(),
       },
     });
