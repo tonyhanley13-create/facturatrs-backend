@@ -37,11 +37,25 @@ export async function createPurchase(req: AuthRequest, res: Response) {
     return res.status(400).json({ detail: 'ncf, rnc_proveedor, nombre_proveedor, fecha y monto_total son requeridos' });
   }
   const tipo = tipo_comprobante || NCF_TYPE_MAP[req.body.tipo_comprobante_label || ''] || '09';
+  const cleanNcf = ncf.trim().toUpperCase();
   try {
+    const existingNcf = await prisma.purchaseRecord.findFirst({
+      where: {
+        company_id: req.user.company_id,
+        ncf: { equals: cleanNcf, mode: 'insensitive' },
+      },
+    });
+    if (existingNcf) {
+      return res.status(400).json({
+        detail: `Ya existe una compra registrada con el NCF '${cleanNcf}' (${existingNcf.nombre_proveedor}).`,
+        duplicate: true,
+      });
+    }
+
     const purchase = await prisma.purchaseRecord.create({
       data: {
         company_id: req.user.company_id,
-        ncf,
+        ncf: cleanNcf,
         rnc_proveedor,
         nombre_proveedor,
         fecha: new Date(fecha),
@@ -67,10 +81,28 @@ export async function updatePurchase(req: AuthRequest, res: Response) {
     });
     if (!existing) return res.status(404).json({ detail: 'Compra no encontrada' });
     const { ncf, rnc_proveedor, nombre_proveedor, fecha, monto_total, itbis, tipo_comprobante } = req.body;
+    const cleanNcf = ncf !== undefined ? ncf.trim().toUpperCase() : existing.ncf;
+
+    if (cleanNcf !== existing.ncf) {
+      const duplicateNcf = await prisma.purchaseRecord.findFirst({
+        where: {
+          company_id: req.user.company_id,
+          ncf: { equals: cleanNcf, mode: 'insensitive' },
+          id: { not: id },
+        },
+      });
+      if (duplicateNcf) {
+        return res.status(400).json({
+          detail: `Ya existe otra compra registrada con el NCF '${cleanNcf}' (${duplicateNcf.nombre_proveedor}).`,
+          duplicate: true,
+        });
+      }
+    }
+
     const updated = await prisma.purchaseRecord.update({
       where: { id },
       data: {
-        ncf: ncf !== undefined ? ncf : existing.ncf,
+        ncf: cleanNcf,
         rnc_proveedor: rnc_proveedor !== undefined ? rnc_proveedor : existing.rnc_proveedor,
         nombre_proveedor: nombre_proveedor !== undefined ? nombre_proveedor : existing.nombre_proveedor,
         fecha: fecha !== undefined ? new Date(fecha) : existing.fecha,
@@ -204,6 +236,26 @@ Devuelve obligatoriamente un objeto JSON con esta estructura exacta y completa (
     }
 
     const parsedData = JSON.parse(text);
+
+    if (parsedData.ncf) {
+      const cleanNcf = String(parsedData.ncf).trim().toUpperCase();
+      const existing = await prisma.purchaseRecord.findFirst({
+        where: {
+          company_id: req.user.company_id,
+          ncf: { equals: cleanNcf, mode: 'insensitive' },
+        },
+      });
+      if (existing) {
+        parsedData.already_exists = true;
+        parsedData.existing_info = {
+          id: existing.id,
+          nombre_proveedor: existing.nombre_proveedor,
+          rnc_proveedor: existing.rnc_proveedor,
+          fecha: existing.fecha,
+          monto_total: existing.monto_total,
+        };
+      }
+    }
 
     return res.status(200).json(parsedData);
   } catch (error: any) {
