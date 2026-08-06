@@ -3,6 +3,7 @@ import { authenticateToken } from '../middlewares/auth';
 import {
   getSuperUsers,
   getSuperStats,
+  getSuperCompanies,
   updateUserRole,
   deleteSuperUser,
   clearAllData,
@@ -15,6 +16,7 @@ const router = Router();
 
 router.get('/stats', authenticateToken, getSuperStats);
 router.get('/users', authenticateToken, getSuperUsers);
+router.get('/companies', authenticateToken, getSuperCompanies);
 router.put('/users/:id/role', authenticateToken, updateUserRole);
 router.delete('/users/:id', authenticateToken, deleteSuperUser);
 router.post('/clear-all', authenticateToken, clearAllData);

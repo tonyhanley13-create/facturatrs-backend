@@ -52,6 +52,7 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^20.11.24",
     "@types/pdfkit": "^0.17.6",
+    "@types/pg": "^8.20.4",
     "jest": "^30.4.2",
     "prisma": "^5.10.0",
     "ts-jest": "^29.4.11",

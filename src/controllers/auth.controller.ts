@@ -707,6 +707,11 @@ export async function deleteCompany(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
+  // Solo el super administrador (hanley) puede eliminar empresas
+  if (!req.user.is_super_admin) {
+    return res.status(403).json({ detail: 'Solo el super administrador puede eliminar empresas' });
+  }
+
   const companyId = Number(req.params.id);
 
   if (!companyId) {
@@ -714,36 +719,33 @@ export async function deleteCompany(req: AuthRequest, res: Response) {
   }
 
   try {
-    // Verificar que el usuario es admin de esta empresa (o super admin)
-    const isSuperAdmin = req.user.is_super_admin;
-    const userCompany = isSuperAdmin ? null : await prisma.userCompany.findFirst({
-      where: {
-        user_id: req.user.id,
-        company_id: companyId,
-        role: 'admin',
-      },
-    });
-
-    if (!isSuperAdmin && !userCompany) {
-      return res.status(403).json({ detail: 'No tienes permisos de administrador para eliminar esta empresa' });
+    const company = await prisma.company.findUnique({ where: { id: companyId } });
+    if (!company) {
+      return res.status(404).json({ detail: 'Empresa no encontrada' });
     }
 
-    // No permitir eliminar la empresa activa si es la única del usuario
-    if (!isSuperAdmin) {
-      const companyCount = await prisma.userCompany.count({
-        where: { user_id: req.user.id },
-      });
-      if (companyCount <= 1) {
-        return res.status(400).json({ detail: 'No puedes eliminar tu única empresa. Elimina tu cuenta primero.' });
-      }
-    }
-
-    // Eliminar todo en una transacción
+    // Eliminar todo en una transacción (incluye todas las tablas relacionadas)
     await prisma.$transaction(async (tx) => {
+      const invoiceIds = (
+        await tx.invoice.findMany({
+          where: { company_id: companyId },
+          select: { id: true },
+        })
+      ).map((i) => i.id);
+
+      if (invoiceIds.length > 0) {
+        await tx.invoiceAuditLog.deleteMany({ where: { invoice_id: { in: invoiceIds } } });
+        await tx.invoiceItem.deleteMany({ where: { invoice_id: { in: invoiceIds } } });
+      }
+
+      await tx.invoice.deleteMany({ where: { company_id: companyId } });
+      await tx.receivedEcf.deleteMany({ where: { company_id: companyId } });
+      await tx.certificationProgress.deleteMany({ where: { company_id: companyId } });
+      await tx.ncfSequence.deleteMany({ where: { company_id: companyId } });
+      await tx.purchaseRecord.deleteMany({ where: { company_id: companyId } });
+      await tx.dgiiReport.deleteMany({ where: { company_id: companyId } });
       await tx.userCompany.deleteMany({ where: { company_id: companyId } });
       await tx.chartOfAccount.deleteMany({ where: { company_id: companyId } });
-      await tx.invoiceItem.deleteMany({ where: { invoice: { company_id: companyId } } });
-      await tx.invoice.deleteMany({ where: { company_id: companyId } });
       await tx.client.deleteMany({ where: { company_id: companyId } });
       await tx.productService.deleteMany({ where: { company_id: companyId } });
       await tx.company.delete({ where: { id: companyId } });

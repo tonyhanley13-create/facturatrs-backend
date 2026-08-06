@@ -32,6 +32,36 @@ export async function getSuperStats(req: AuthRequest, res: Response) {
   }
 }
 
+export async function getSuperCompanies(req: AuthRequest, res: Response) {
+  if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
+  if (!requireSuperAdmin(req, res)) return;
+
+  try {
+    const companies = await prisma.company.findMany({
+      select: {
+        id: true,
+        name: true,
+        rnc: true,
+        created_at: true,
+        _count: {
+          select: {
+            userCompanies: true,
+            invoices: true,
+            clients: true,
+            products: true,
+          },
+        },
+      },
+      orderBy: { id: 'asc' },
+    });
+
+    return res.status(200).json(companies);
+  } catch (error: any) {
+    console.error('❌ Error al listar empresas:', error);
+    return res.status(500).json({ detail: 'Error al listar empresas' });
+  }
+}
+
 export async function getSuperUsers(req: AuthRequest, res: Response) {
   if (!req.user) return res.status(401).json({ detail: 'No autorizado' });
   if (!requireSuperAdmin(req, res)) return;

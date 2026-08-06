@@ -47,7 +47,7 @@ export async function authenticateToken(req: AuthRequest, res: Response, next: N
       return;
     }
 
-    // Buscar al usuario en base de datos para validar sesión única
+    // Buscar al usuario en base de datos maestra para validar sesión única
     const user = await prisma.user.findUnique({
       where: { id: decoded.user_id },
       select: { username: true, session_token: true }

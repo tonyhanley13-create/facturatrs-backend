@@ -107,12 +107,13 @@ async function logUsage(userId: number, action: string, extraData?: any) {
   }
 }
 
-export async function generateInvoiceNumber(userId: number, companyId: number): Promise<string> {
+export async function generateInvoiceNumber(userId: number, companyId: number, documentType?: string): Promise<string> {
   const company = await prisma.company.findUnique({
     where: { id: companyId },
   });
 
-  const prefix = company?.invoice_prefix || 'FACT-';
+  const isReembolso = documentType === 'reembolso';
+  const prefix = isReembolso ? 'RB-' : (company?.invoice_prefix || 'FACT-');
   const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, companyId);
   const nextNum = Math.max(company?.next_invoice_number || 1, maxDbInvoiceNum + 1);
 
@@ -133,7 +134,7 @@ export async function generateInvoiceNumber(userId: number, companyId: number): 
     });
   }
 
-  return `${prefix}${nextNum.toString().padStart(6, '0')}`;
+  return `${prefix}${nextNum.toString().padStart(7, '0')}`;
 }
 
 // ==========================================
@@ -209,23 +210,38 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
     }
 
     // Sobrescribir con los valores en vivo de la tabla ncfSequence
+    let safeNextInvoiceNum = company?.next_invoice_number || 1;
     if (company?.id) {
+      const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, company.id);
+      safeNextInvoiceNum = Math.max(company.next_invoice_number || 1, maxDbInvoiceNum + 1);
+
       const liveSequences = await prisma.ncfSequence.findMany({
         where: { company_id: company.id },
       });
+      const validTypes = getNcfTypesForMode(mode);
       const liveMap = new Map(liveSequences.map(s => [s.type, s]));
 
-      ncfRanges = ncfRanges.map((range: any) => {
-        const live = liveMap.get(range.type);
-        if (live) {
-          return {
-            ...range,
-            next: live.next,
-            end: live.end,
-          };
-        }
-        return range;
-      });
+      const liveForMode = liveSequences.filter(s => validTypes.includes(s.type));
+      if (liveForMode.length > 0) {
+        ncfRanges = liveForMode.map(s => ({
+          type: s.type,
+          prefix: s.prefix,
+          next: s.next,
+          end: s.end,
+        }));
+      } else {
+        ncfRanges = ncfRanges.map((range: any) => {
+          const live = liveMap.get(range.type || range.prefix);
+          if (live) {
+            return {
+              ...range,
+              next: live.next,
+              end: live.end,
+            };
+          }
+          return range;
+        });
+      }
     }
 
     return res.status(200).json({
@@ -241,7 +257,7 @@ export async function getCompanySettings(req: AuthRequest, res: Response) {
       currency: settings.default_currency,
       tax_rate: Number(settings.tax_percentage),
       plan: settings.plan_type,
-      next_invoice_number: company?.next_invoice_number || 1,
+      next_invoice_number: safeNextInvoiceNum,
       invoice_prefix: company?.invoice_prefix || 'FACT-',
       alanube_company_id: company?.alanube_company_id || settings.alanube_company_id,
       fiscal_provider: company?.fiscal_provider || 'alanube',
@@ -699,6 +715,13 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
       return res.status(400).json({ detail: 'El monto total de la factura debe ser mayor a cero' });
     }
 
+    const parsedCustomFields =
+      custom_fields && typeof custom_fields === 'object'
+        ? (custom_fields as Record<string, any>)
+        : {};
+    const effectiveReferenceNcf =
+      reference_ncf || parsedCustomFields.reference_ncf || parsedCustomFields.ncf_comprobante || null;
+
     await prisma.$transaction(async (tx: any) => {
       await tx.invoiceItem.deleteMany({ where: { invoice_id: invoiceId } });
       await tx.invoice.update({
@@ -715,7 +738,7 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
           due_date: due_date ? new Date(due_date) : undefined,
           notes,
           document_type: document_type || null,
-          reference_ncf: reference_ncf || null,
+          reference_ncf: effectiveReferenceNcf,
           custom_fields: custom_fields ? JSON.stringify(custom_fields) : null,
         },
       });
@@ -725,7 +748,9 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
     });
 
     // Generar NCF si la factura no tiene uno (ej. comprobantes tradicionales creados antes del fix)
-    if (!invoice.ncf) {
+    // No generar NCF para reembolsos
+    const isReembolso = document_type === 'reembolso' || invoice.document_type === 'reembolso';
+    if (!invoice.ncf && !isReembolso) {
       const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
       if (company && company.invoicing_mode === 'tradicional') {
         let docTypeName = 'Factura de Crédito Fiscal';
@@ -784,17 +809,29 @@ export async function getInvoices(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { status, limit, offset } = req.query;
-  const parseLimit = limit ? parseInt(String(limit), 10) : 50;
+  const { status, limit, offset, q, search } = req.query;
+  const searchTerm = String(q || search || '').trim();
+  const parseLimit = limit ? parseInt(String(limit), 10) : (searchTerm ? 500 : 200);
   const parseOffset = offset ? parseInt(String(offset), 10) : 0;
+
+  const whereCondition: any = {
+    company_id: req.user.company_id || undefined,
+    status: status ? String(status) : undefined,
+  };
+
+  if (searchTerm) {
+    whereCondition.OR = [
+      { invoice_number: { contains: searchTerm } },
+      { ncf: { contains: searchTerm } },
+      { description: { contains: searchTerm } },
+      { client: { name: { contains: searchTerm } } },
+      { client: { rnc: { contains: searchTerm } } },
+    ];
+  }
 
   try {
     const invoices = await prisma.invoice.findMany({
-      where: {
-        company_id: req.user.company_id || undefined,
-        status: status ? String(status) : undefined,
-        user_id: req.user.is_super_admin ? undefined : req.user.id,
-      },
+      where: whereCondition,
       include: {
         client: true,
         items: true,
@@ -802,7 +839,7 @@ export async function getInvoices(req: AuthRequest, res: Response) {
       },
       take: parseLimit,
       skip: parseOffset,
-      orderBy: { id: 'desc' },
+      orderBy: { created_at: 'desc' },
     });
 
     const result = invoices.map((inv: any) => {
@@ -842,6 +879,8 @@ export async function getInvoices(req: AuthRequest, res: Response) {
           } catch (e) { }
           return null;
         })(),
+        description: inv.description,
+        notes: inv.notes,
         custom_fields: inv.custom_fields,
         dgii_error: inv.dgii_error,
         items: inv.items.map((item: any) => ({
@@ -889,6 +928,13 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
   if (!client_id || !items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ detail: 'client_id y al menos un item son requeridos' });
   }
+
+  const parsedCustomFields =
+    custom_fields && typeof custom_fields === 'object'
+      ? (custom_fields as Record<string, any>)
+      : {};
+  const effectiveReferenceNcf =
+    reference_ncf || parsedCustomFields.reference_ncf || parsedCustomFields.ncf_comprobante || null;
 
   try {
     if (!(await checkInvoiceLimit(userId, companyId))) {
@@ -944,7 +990,7 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     if (calculatedTotal <= 0) {
       return res.status(400).json({ detail: 'El monto total de la factura debe ser mayor a cero' });
     }
-    const invoiceNumber = await generateInvoiceNumber(userId, companyId);
+    const invoiceNumber = await generateInvoiceNumber(userId, companyId, document_type);
 
     // Crear factura e items en una sola transacción
     const newInvoice = await prisma.$transaction(async (tx: any) => {
@@ -965,7 +1011,7 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
           due_date: due_date ? new Date(due_date) : undefined,
           notes,
           document_type: document_type || null,
-          reference_ncf: reference_ncf || null,
+          reference_ncf: effectiveReferenceNcf,
           custom_fields: custom_fields ? JSON.stringify(custom_fields) : null,
         },
       });
@@ -997,7 +1043,9 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
       const isTraditionalDoc = ['B01', 'B02', 'B03', 'B04'].includes(traditionalPrefix);
       
       // Auto-generar NCF si la empresa es tradicional, o si es transición y el comprobante elegido es tradicional
-      if (company.invoicing_mode === 'tradicional' || (company.invoicing_mode === 'transicion' && isTraditionalDoc)) {
+      // No generar NCF para reembolsos
+      const isReembolso = document_type === 'reembolso';
+      if (!isReembolso && (company.invoicing_mode === 'tradicional' || (company.invoicing_mode === 'transicion' && isTraditionalDoc))) {
         const ncf = await getNextNcfNumber(companyId, traditionalPrefix);
         await prisma.invoice.update({
           where: { id: newInvoice.id },
@@ -1007,7 +1055,7 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     }
 
     const finalInvoice = await prisma.invoice.findUnique({ where: { id: newInvoice.id } });
-    return res.status(200).json({ id: newInvoice.id, number: newInvoice.invoice_number, ncf: finalInvoice?.ncf || null });
+    return res.status(200).json({ id: newInvoice.id, number: newInvoice.invoice_number, ncf: finalInvoice?.ncf || null, document_type: finalInvoice?.document_type || null });
   } catch (error: any) {
     console.error('❌ Error al crear factura con items:', error);
     return res.status(500).json({ detail: error.message });
@@ -1240,7 +1288,7 @@ export async function exportSalesReportToExcel(req: AuthRequest, res: Response) 
       };
       const row = ws.addRow([
         idx + 1,
-        inv.number,
+        inv.invoice_number,
         inv.created_at ? new Date(inv.created_at).toLocaleDateString('es-DO') : '',
         inv.client?.name ?? '',
         inv.client?.rnc ?? '',
@@ -1367,7 +1415,7 @@ export async function getDetailedSalesReport(req: AuthRequest, res: Response) {
       const custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {};
       return {
         index: idx + 1,
-        number: inv.number,
+        number: inv.invoice_number,
         ncf: inv.ncf ?? '',
         date: inv.created_at ? new Date(inv.created_at).toISOString() : '',
         client_name: inv.client?.name ?? '',
@@ -1616,12 +1664,15 @@ export async function getCxcReport(req: AuthRequest, res: Response) {
         range90PlusTotal += amount;
       }
 
-      const clientId = inv.client.id;
+      const clientId = inv.client?.id ?? inv.client_id ?? 0;
+      const clientName = inv.client?.name ?? 'Cliente sin nombre';
+      const clientRnc = inv.client?.rnc ?? '';
+
       if (!clientGroups[clientId]) {
         clientGroups[clientId] = {
           client_id: clientId,
-          client_name: inv.client.name,
-          client_rnc: inv.client.rnc || '',
+          client_name: clientName,
+          client_rnc: clientRnc,
           total_pending: 0,
           invoice_count: 0,
           range_1_15: 0,
@@ -1648,8 +1699,8 @@ export async function getCxcReport(req: AuthRequest, res: Response) {
         ncf: inv.ncf ?? '',
         created_at: inv.created_at.toISOString(),
         due_date: inv.due_date ? inv.due_date.toISOString() : null,
-        client_name: inv.client.name,
-        client_rnc: inv.client.rnc ?? '',
+        client_name: clientName,
+        client_rnc: clientRnc,
         total_amount: amount,
         days_outstanding: diffDays,
         aging_range: range

@@ -148,12 +148,12 @@ export async function scanPurchaseImage(req: AuthRequest, res: Response) {
     const base64Image = req.file.buffer.toString('base64');
     const mimeType = req.file.mimetype;
 
-    const prompt = `Analiza esta factura de República Dominicana y extrae la información en formato JSON.
+    const prompt = `Analiza esta factura de República Dominicana (o el código QR e-CF / URL de la DGII presente en la imagen) y extrae la información en formato JSON.
 Devuelve obligatoriamente un objeto JSON con esta estructura exacta y completa (asegúrate de cerrar el objeto con } al final):
 {
-  "rnc_proveedor": "RNC del emisor/proveedor de 9 o 11 dígitos sin guiones ni espacios",
+  "rnc_proveedor": "RNC del emisor/proveedor de 9 o 11 dígitos sin guiones ni espacios (ej: rncemisor en QR)",
   "nombre_proveedor": "Nombre comercial o razón social del emisor",
-  "ncf": "NCF de la factura (comprobante fiscal que empieza con B o E y tiene 8 o 10 dígitos numéricos)",
+  "ncf": "NCF de la factura (comprobante fiscal que empieza con B o E y tiene 8 o 10 dígitos numéricos, ej: encf o NCF)",
   "fecha": "Fecha de emisión en formato YYYY-MM-DD",
   "monto_total": 0.0,
   "itbis": 0.0,
