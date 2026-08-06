@@ -114,7 +114,7 @@ export const getSavedDocuments = async (req: AuthRequest, res: Response): Promis
       orderBy: { created_at: 'desc' },
     });
 
-    const data = docs.map((d) => ({
+    const data = docs.map((d: any) => ({
       id: d.id,
       customName: d.custom_name,
       fileName: d.file_name,
