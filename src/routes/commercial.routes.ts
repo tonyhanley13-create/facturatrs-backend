@@ -19,6 +19,7 @@ import {
   getCxcReport,
   getRefundsReport,
   registerInvoicePayment,
+  reverseInvoicePayment,
   registerClientAccountAbono,
 } from '../controllers/commercial.controller';
 import { authenticateToken, requireSuperAdmin } from '../middlewares/auth';
@@ -41,6 +42,8 @@ router.put('/invoices/:id', authenticateToken, updateInvoice);
 router.delete('/invoices/:id', authenticateToken, deleteInvoice);
 router.post('/invoices/with-items', authenticateToken, createInvoiceWithItems);
 router.post('/invoices/:id/pay', authenticateToken, registerInvoicePayment);
+router.post('/invoices/:id/reverse-payment', authenticateToken, reverseInvoicePayment);
+router.post('/invoices/:id/unpay', authenticateToken, reverseInvoicePayment);
 router.post('/clients/:clientId/abono', authenticateToken, registerClientAccountAbono);
 
 router.get('/dashboard', authenticateToken, getDashboardData);

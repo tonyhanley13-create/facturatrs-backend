@@ -1672,7 +1672,6 @@ export async function getCxcReport(req: AuthRequest, res: Response) {
     const invoices = await db.invoice.findMany({
       where: {
         company_id: req.user.company_id || undefined,
-        payment_status: { in: ['pending', 'partially_paid'] }
       },
       include: {
         client: { select: { id: true, name: true, rnc: true } }
@@ -1786,6 +1785,7 @@ export async function getCxcReport(req: AuthRequest, res: Response) {
         client_name: clientName,
         client_rnc: clientRnc,
         total_amount: amount,
+        payment_status: inv.payment_status || 'pending',
         days_outstanding: diffDays,
         aging_range: range
       };
@@ -1872,7 +1872,14 @@ export async function getRefundsReport(req: AuthRequest, res: Response) {
     if (payment_status && payment_status !== 'all' && payment_status !== 'Todos') {
       const targetStatus = String(payment_status).toLowerCase();
       filteredInvoices = filteredInvoices.filter((inv: any) => {
-        return (inv.payment_status || 'pending').toLowerCase() === targetStatus;
+        const st = (inv.payment_status || 'pending').toLowerCase();
+        if (targetStatus === 'pagadas' || targetStatus === 'paid') {
+          return st === 'paid' || st === 'pagado' || st === 'pagada';
+        }
+        if (targetStatus === 'pendientes' || targetStatus === 'pending') {
+          return st === 'pending' || st === 'partially_paid' || st === 'pendiente';
+        }
+        return st === targetStatus;
       });
     }
 
@@ -2033,7 +2040,7 @@ export async function registerInvoicePayment(req: AuthRequest, res: Response) {
     else if (m.includes('cheque') || m.includes('transferencia') || m.includes('deposito')) methodCode = '02';
     else if (m.includes('tarjeta')) methodCode = '03';
 
-    const updatedInvoice = await prisma.invoice.update({
+    const updatedInvoice = await db.invoice.update({
       where: { id: invoice.id },
       data: {
         payment_status: newStatus,
@@ -2042,6 +2049,8 @@ export async function registerInvoicePayment(req: AuthRequest, res: Response) {
       },
       include: { client: true, items: true },
     });
+
+    logInvoiceAction(invoiceId, req.user.id, 'payment_registered', newStatus, undefined, `Pago registrado por ${thisPaymentAmount}`);
 
     return res.status(200).json({
       message: 'Pago registrado exitosamente',
@@ -2056,6 +2065,80 @@ export async function registerInvoicePayment(req: AuthRequest, res: Response) {
     });
   } catch (error: any) {
     console.error('❌ Error al registrar pago de factura:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}
+
+export async function reverseInvoicePayment(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  const invoiceId = parseInt(req.params.id, 10);
+  if (isNaN(invoiceId)) {
+    return res.status(400).json({ detail: 'ID de factura inválido' });
+  }
+
+  try {
+    const db = (req as any).tenantPrisma || prisma;
+    const invoice = await db.invoice.findFirst({
+      where: {
+        id: invoiceId,
+        company_id: req.user.company_id || undefined,
+      },
+    });
+
+    if (!invoice) {
+      return res.status(404).json({ detail: 'Factura no encontrada' });
+    }
+
+    let customObj: any = {};
+    if (invoice.custom_fields) {
+      try {
+        customObj = JSON.parse(invoice.custom_fields);
+      } catch (_) {}
+    }
+
+    const total = Number(invoice.total_amount);
+
+    customObj.paid_amount = 0;
+    customObj.pending_amount = total;
+    customObj.payment_status = 'pending';
+    if (customObj.payment_info) {
+      delete customObj.payment_info;
+    }
+    if (Array.isArray(customObj.payment_history)) {
+      customObj.payment_history.push({
+        id: Date.now(),
+        action: 'reversed',
+        date: new Date().toISOString(),
+        reversed_by: (req.user as any).username || req.user.email || 'Sistema',
+      });
+    }
+
+    const updatedInvoice = await db.invoice.update({
+      where: { id: invoice.id },
+      data: {
+        payment_status: 'pending',
+        custom_fields: JSON.stringify(customObj),
+      },
+      include: { client: true, items: true },
+    });
+
+    logInvoiceAction(invoiceId, req.user.id, 'payment_reversed', 'pending', undefined, 'Pago reversado por el usuario');
+
+    return res.status(200).json({
+      message: 'Pago reversado exitosamente. La factura ha vuelto a estar pendiente.',
+      invoice: {
+        id: updatedInvoice.id,
+        invoice_number: updatedInvoice.invoice_number,
+        payment_status: 'pending',
+        paid_amount: 0,
+        pending_amount: total,
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ Error al reversar pago de factura:', error);
     return res.status(500).json({ detail: error.message });
   }
 }
