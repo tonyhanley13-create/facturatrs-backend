@@ -820,13 +820,38 @@ export async function getInvoices(req: AuthRequest, res: Response) {
   };
 
   if (searchTerm) {
-    whereCondition.OR = [
-      { invoice_number: { contains: searchTerm } },
-      { ncf: { contains: searchTerm } },
-      { description: { contains: searchTerm } },
-      { client: { name: { contains: searchTerm } } },
-      { client: { rnc: { contains: searchTerm } } },
+    const tokens = searchTerm.split(/\s+/).filter(Boolean);
+    const buildOrList = (term: string) => [
+      { invoice_number: { contains: term, mode: 'insensitive' } },
+      { ncf: { contains: term, mode: 'insensitive' } },
+      { description: { contains: term, mode: 'insensitive' } },
+      { notes: { contains: term, mode: 'insensitive' } },
+      { document_type: { contains: term, mode: 'insensitive' } },
+      { custom_fields: { contains: term, mode: 'insensitive' } },
+      { currency: { contains: term, mode: 'insensitive' } },
+      { client: { name: { contains: term, mode: 'insensitive' } } },
+      { client: { rnc: { contains: term, mode: 'insensitive' } } },
+      { client: { phone: { contains: term, mode: 'insensitive' } } },
+      { user: { username: { contains: term, mode: 'insensitive' } } },
+      { user: { name: { contains: term, mode: 'insensitive' } } },
+      { items: { some: { description: { contains: term, mode: 'insensitive' } } } },
+      { items: { some: { item_name: { contains: term, mode: 'insensitive' } } } },
+      { items: { some: { item_code: { contains: term, mode: 'insensitive' } } } },
     ];
+
+    if (tokens.length <= 1) {
+      whereCondition.OR = buildOrList(searchTerm);
+    } else {
+      const fullMatch = buildOrList(searchTerm);
+      const tokenConditions = tokens.map((token) => ({
+        OR: buildOrList(token),
+      }));
+
+      whereCondition.OR = [
+        ...fullMatch,
+        { AND: tokenConditions },
+      ];
+    }
   }
 
   try {
@@ -1342,7 +1367,7 @@ export async function getDetailedSalesReport(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { start_date, end_date, document_type, is_credit } = req.query;
+  const { start_date, end_date, document_type, is_credit, client_search } = req.query;
 
   if (!start_date || !end_date) {
     return res.status(400).json({ detail: 'start_date y end_date son requeridos' });
@@ -1402,6 +1427,15 @@ export async function getDetailedSalesReport(req: AuthRequest, res: Response) {
           const custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {};
           return (custom.facturado_a_credito === true) === wantCredit;
         } catch { return false; }
+      });
+    }
+
+    if (client_search) {
+      const searchStr = String(client_search).trim().toLowerCase();
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        const clientName = (inv.client?.name || '').toLowerCase();
+        const clientRnc = (inv.client?.rnc || '').toLowerCase();
+        return clientName.includes(searchStr) || clientRnc.includes(searchStr);
       });
     }
 
@@ -1465,7 +1499,7 @@ export async function getSalesReport(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { start_date, end_date, group_by, document_type, is_credit } = req.query;
+  const { start_date, end_date, group_by, document_type, is_credit, client_search } = req.query;
 
   if (!start_date || !end_date) {
     return res.status(400).json({ detail: 'start_date y end_date son requeridos' });
@@ -1485,6 +1519,9 @@ export async function getSalesReport(req: AuthRequest, res: Response) {
           lte: end,
         },
       },
+      include: {
+        client: { select: { id: true, name: true, rnc: true } }
+      }
     });
 
     // Filtrar por modalidad (solo facturas que correspondan al modo de facturación)
@@ -1526,6 +1563,15 @@ export async function getSalesReport(req: AuthRequest, res: Response) {
         } catch (e) {
           return false;
         }
+      });
+    }
+
+    if (client_search) {
+      const searchStr = String(client_search).trim().toLowerCase();
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        const clientName = (inv.client?.name || '').toLowerCase();
+        const clientRnc = (inv.client?.rnc || '').toLowerCase();
+        return clientName.includes(searchStr) || clientRnc.includes(searchStr);
       });
     }
 
@@ -1749,9 +1795,69 @@ export async function registerInvoicePayment(req: AuthRequest, res: Response) {
       return res.status(404).json({ detail: 'Factura no encontrada' });
     }
 
+    const {
+      payment_method,
+      payment_reference,
+      payment_date,
+      payment_amount,
+      payment_notes,
+    } = req.body || {};
+
+    let customObj: any = {};
+    if (invoice.custom_fields) {
+      try {
+        customObj = JSON.parse(invoice.custom_fields);
+      } catch (_) {}
+    }
+
+    const total = Number(invoice.total_amount);
+    const existingPaid = Number(customObj.paid_amount || (invoice.payment_status === 'paid' ? total : 0));
+
+    // Amount being paid in this transaction
+    const thisPaymentAmount = payment_amount ? Number(payment_amount) : (total - existingPaid);
+
+    const newPaidTotal = existingPaid + thisPaymentAmount;
+    const pendingBalance = Math.max(0, total - newPaidTotal);
+
+    let newStatus = 'pending';
+    if (newPaidTotal >= total - 0.01) {
+      newStatus = 'paid';
+    } else if (newPaidTotal > 0) {
+      newStatus = 'partially_paid';
+    }
+
+    const history = Array.isArray(customObj.payment_history) ? customObj.payment_history : [];
+    const paymentEntry = {
+      id: Date.now(),
+      method: payment_method || 'Efectivo',
+      reference: payment_reference || '',
+      date: payment_date || new Date().toISOString(),
+      amount: thisPaymentAmount,
+      notes: payment_notes || '',
+      received_by: (req.user as any).username || req.user.email || 'Sistema',
+    };
+    history.push(paymentEntry);
+
+    customObj.paid_amount = newPaidTotal;
+    customObj.pending_amount = pendingBalance;
+    customObj.payment_info = paymentEntry;
+    customObj.payment_history = history;
+
+    // Map method text to DGII code if needed
+    let methodCode = invoice.payment_method || '01';
+    const m = (payment_method || '').toString().toLowerCase();
+    if (m.includes('efectivo')) methodCode = '01';
+    else if (m.includes('cheque') || m.includes('transferencia') || m.includes('deposito')) methodCode = '02';
+    else if (m.includes('tarjeta')) methodCode = '03';
+
     const updatedInvoice = await prisma.invoice.update({
       where: { id: invoice.id },
-      data: { payment_status: 'paid' },
+      data: {
+        payment_status: newStatus,
+        payment_method: methodCode,
+        custom_fields: JSON.stringify(customObj),
+      },
+      include: { client: true, items: true },
     });
 
     return res.status(200).json({
@@ -1760,10 +1866,121 @@ export async function registerInvoicePayment(req: AuthRequest, res: Response) {
         id: updatedInvoice.id,
         invoice_number: updatedInvoice.invoice_number,
         payment_status: updatedInvoice.payment_status,
+        paid_amount: newPaidTotal,
+        pending_amount: pendingBalance,
+        payment_info: paymentEntry,
       },
     });
   } catch (error: any) {
     console.error('❌ Error al registrar pago de factura:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}
+
+export async function registerClientAccountAbono(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  const clientId = parseInt(req.params.clientId, 10);
+  if (isNaN(clientId)) {
+    return res.status(400).json({ detail: 'ID de cliente inválido' });
+  }
+
+  const { payment_amount, payment_method, payment_reference, payment_date, payment_notes } = req.body || {};
+  let remainingAbono = Number(payment_amount);
+
+  if (isNaN(remainingAbono) || remainingAbono <= 0) {
+    return res.status(400).json({ detail: 'El monto del abono debe ser mayor a 0' });
+  }
+
+  try {
+    // Fetch all unpaid / partially paid invoices for this client (excluding voided/draft)
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        client_id: clientId,
+        company_id: req.user.company_id || undefined,
+        payment_status: { in: ['pending', 'partially_paid'] },
+        status: { notIn: ['voided', 'anulada'] },
+      },
+      orderBy: { created_at: 'asc' },
+    });
+
+    const affectedInvoices: any[] = [];
+    const totalAbonoOriginal = remainingAbono;
+
+    for (const inv of invoices) {
+      if (remainingAbono <= 0) break;
+
+      let customObj: any = {};
+      if (inv.custom_fields) {
+        try { customObj = JSON.parse(inv.custom_fields); } catch (_) {}
+      }
+
+      const totalInv = Number(inv.total_amount);
+      const currentPaid = Number(customObj.paid_amount || 0);
+      const invBalance = totalInv - currentPaid;
+
+      if (invBalance <= 0) continue;
+
+      const appliedToThis = Math.min(remainingAbono, invBalance);
+      const newPaidTotal = currentPaid + appliedToThis;
+      const newPending = Math.max(0, totalInv - newPaidTotal);
+
+      let newStatus = 'pending';
+      if (newPaidTotal >= totalInv - 0.01) {
+        newStatus = 'paid';
+      } else if (newPaidTotal > 0) {
+        newStatus = 'partially_paid';
+      }
+
+      const history = Array.isArray(customObj.payment_history) ? customObj.payment_history : [];
+      const paymentEntry = {
+        id: Date.now(),
+        method: payment_method || 'Efectivo',
+        reference: payment_reference || '',
+        date: payment_date || new Date().toISOString(),
+        amount: appliedToThis,
+        notes: payment_notes ? `${payment_notes} (Abono a Cuenta)` : 'Abono a Cuenta General',
+        received_by: (req.user as any).username || req.user.email || 'Sistema',
+      };
+      history.push(paymentEntry);
+
+      customObj.paid_amount = newPaidTotal;
+      customObj.pending_amount = newPending;
+      customObj.payment_info = paymentEntry;
+      customObj.payment_history = history;
+
+      await prisma.invoice.update({
+        where: { id: inv.id },
+        data: {
+          payment_status: newStatus,
+          custom_fields: JSON.stringify(customObj),
+        },
+      });
+
+      affectedInvoices.push({
+        id: inv.id,
+        invoice_number: inv.invoice_number,
+        ncf: inv.ncf,
+        previous_balance: invBalance,
+        amount_applied: appliedToThis,
+        new_balance: newPending,
+        new_status: newStatus,
+      });
+
+      remainingAbono -= appliedToThis;
+    }
+
+    return res.status(200).json({
+      message: 'Abono a cuenta aplicado exitosamente',
+      total_abono: totalAbonoOriginal,
+      applied_total: totalAbonoOriginal - Math.max(0, remainingAbono),
+      remaining_unapplied: Math.max(0, remainingAbono),
+      affected_invoices: affectedInvoices,
+    });
+  } catch (error: any) {
+    console.error('❌ Error al registrar abono a cuenta:', error);
     return res.status(500).json({ detail: error.message });
   }
 }
