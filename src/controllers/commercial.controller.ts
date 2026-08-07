@@ -827,15 +827,19 @@ export async function getInvoices(req: AuthRequest, res: Response) {
     return res.status(401).json({ detail: 'No autorizado' });
   }
 
-  const { status, limit, offset, q, search } = req.query;
+  const { status, limit, offset, q, search, client_id } = req.query;
   const searchTerm = String(q || search || '').trim();
-  const parseLimit = limit ? parseInt(String(limit), 10) : (searchTerm ? 500 : 200);
+  const parseLimit = limit ? parseInt(String(limit), 10) : 5000;
   const parseOffset = offset ? parseInt(String(offset), 10) : 0;
 
   const whereCondition: any = {
     company_id: req.user.company_id || undefined,
     status: status ? String(status) : undefined,
   };
+
+  if (client_id) {
+    whereCondition.client_id = parseInt(String(client_id), 10);
+  }
 
   if (searchTerm) {
     const tokens = searchTerm.split(/\s+/).filter(Boolean);
