@@ -113,25 +113,37 @@ export async function generateInvoiceNumber(userId: number, companyId: number, d
   });
 
   const isReembolso = documentType === 'reembolso';
-  const prefix = isReembolso ? 'RB-' : (company?.invoice_prefix || 'FACT-');
-  const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, companyId);
-  const nextNum = Math.max(company?.next_invoice_number || 1, maxDbInvoiceNum + 1);
+  const isCoopsemuca = documentType === 'coopsemuca';
+  let prefix = company?.invoice_prefix || 'FACT-';
+  let filterPrefix: string | undefined = undefined;
 
-  // Actualizar next_invoice_number en Company para mantener la consistencia
-  await prisma.company.update({
-    where: { id: companyId },
-    data: { next_invoice_number: nextNum + 1 },
-  });
+  if (isReembolso) {
+    prefix = 'RB-';
+    filterPrefix = 'RB-';
+  } else if (isCoopsemuca) {
+    prefix = 'CP-';
+    filterPrefix = 'CP-';
+  }
 
-  // También actualizar en companySettings legacy por consistencia
-  const settings = await prisma.companySettings.findFirst({
-    where: { user_id: userId },
-  });
-  if (settings) {
-    await prisma.companySettings.update({
-      where: { id: settings.id },
+  const maxDbInvoiceNum = await getMaxInvoiceNumberFromDb(prisma, companyId, filterPrefix);
+  const nextNum = (isReembolso || isCoopsemuca) ? (maxDbInvoiceNum + 1) : Math.max(company?.next_invoice_number || 1, maxDbInvoiceNum + 1);
+
+  if (!isReembolso && !isCoopsemuca) {
+    // Actualizar next_invoice_number en Company solo para facturas estándar
+    await prisma.company.update({
+      where: { id: companyId },
       data: { next_invoice_number: nextNum + 1 },
     });
+
+    const settings = await prisma.companySettings.findFirst({
+      where: { user_id: userId },
+    });
+    if (settings) {
+      await prisma.companySettings.update({
+        where: { id: settings.id },
+        data: { next_invoice_number: nextNum + 1 },
+      });
+    }
   }
 
   return `${prefix}${nextNum.toString().padStart(7, '0')}`;
@@ -661,21 +673,24 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
   } = req.body;
 
   try {
-    const invoice = await prisma.invoice.findFirst({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoice = await db.invoice.findFirst({
       where: {
         id: invoiceId,
         company_id: req.user.company_id || undefined,
       },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
-    if (invoice.status !== 'draft') {
+
+    const isReembolsoOrCoop = document_type === 'reembolso' || document_type === 'coopsemuca' || invoice.document_type === 'reembolso' || invoice.document_type === 'coopsemuca' || invoice.invoice_number?.startsWith('RB-') || invoice.invoice_number?.startsWith('CP-');
+    if (invoice.status !== 'draft' && !isReembolsoOrCoop) {
       return res.status(400).json({ detail: 'Solo se pueden editar facturas en estado borrador' });
     }
     if (!client_id || !items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ detail: 'client_id y al menos un item son requeridos' });
     }
 
-    const client = await prisma.client.findFirst({
+    const client = await db.client.findFirst({
       where: { id: Number(client_id), company_id: req.user.company_id },
     });
     if (!client) return res.status(404).json({ detail: 'Cliente no encontrado' });
@@ -722,7 +737,7 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
     const effectiveReferenceNcf =
       reference_ncf || parsedCustomFields.reference_ncf || parsedCustomFields.ncf_comprobante || null;
 
-    await prisma.$transaction(async (tx: any) => {
+    await db.$transaction(async (tx: any) => {
       await tx.invoiceItem.deleteMany({ where: { invoice_id: invoiceId } });
       await tx.invoice.update({
         where: { id: invoiceId },
@@ -748,8 +763,8 @@ export async function updateInvoice(req: AuthRequest, res: Response) {
     });
 
     // Generar NCF si la factura no tiene uno (ej. comprobantes tradicionales creados antes del fix)
-    // No generar NCF para reembolsos
-    const isReembolso = document_type === 'reembolso' || invoice.document_type === 'reembolso';
+    // No generar NCF para reembolsos ni COOPSEMUCA
+    const isReembolso = document_type === 'reembolso' || invoice.document_type === 'reembolso' || document_type === 'coopsemuca' || invoice.document_type === 'coopsemuca';
     if (!invoice.ncf && !isReembolso) {
       const company = await prisma.company.findUnique({ where: { id: req.user.company_id } });
       if (company && company.invoicing_mode === 'tradicional') {
@@ -782,20 +797,23 @@ export async function deleteInvoice(req: AuthRequest, res: Response) {
   if (isNaN(invoiceId)) return res.status(400).json({ detail: 'ID de factura inválido' });
 
   try {
-    const invoice = await prisma.invoice.findFirst({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoice = await db.invoice.findFirst({
       where: {
         id: invoiceId,
         company_id: req.user.company_id || undefined,
       },
     });
     if (!invoice) return res.status(404).json({ detail: 'Factura no encontrada' });
-    if (invoice.status !== 'draft' && invoice.status !== 'error') {
+
+    const isReembolsoOrCoop = invoice.document_type === 'reembolso' || invoice.document_type === 'coopsemuca' || invoice.invoice_number?.startsWith('RB-') || invoice.invoice_number?.startsWith('CP-');
+    if (invoice.status !== 'draft' && invoice.status !== 'error' && !isReembolsoOrCoop) {
       return res.status(400).json({ detail: 'Solo se pueden eliminar facturas en borrador o con error' });
     }
 
     logInvoiceAction(invoiceId, req.user.id, 'deleted', invoice.status, undefined, 'Factura eliminada');
-    await prisma.invoiceItem.deleteMany({ where: { invoice_id: invoiceId } });
-    await prisma.invoice.delete({ where: { id: invoiceId } });
+    await db.invoiceItem.deleteMany({ where: { invoice_id: invoiceId } });
+    await db.invoice.delete({ where: { id: invoiceId } });
 
     return res.status(200).json({ message: 'Factura eliminada exitosamente' });
   } catch (error: any) {
@@ -1018,7 +1036,7 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     }
     const invoiceNumber = await generateInvoiceNumber(userId, companyId, document_type);
 
-    const isReembolso = document_type === 'reembolso';
+    const isReembolso = document_type === 'reembolso' || document_type === 'coopsemuca';
     const isCredito = parsedCustomFields.facturado_a_credito === true;
     let initialPaymentStatus = req.body.payment_status;
     if (!initialPaymentStatus) {
@@ -1084,8 +1102,8 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
       const isTraditionalDoc = ['B01', 'B02', 'B03', 'B04'].includes(traditionalPrefix);
       
       // Auto-generar NCF si la empresa es tradicional, o si es transición y el comprobante elegido es tradicional
-      // No generar NCF para reembolsos
-      const isReembolso = document_type === 'reembolso';
+      // No generar NCF para reembolsos ni COOPSEMUCA
+      const isReembolso = document_type === 'reembolso' || document_type === 'coopsemuca';
       if (!isReembolso && (company.invoicing_mode === 'tradicional' || (company.invoicing_mode === 'transicion' && isTraditionalDoc))) {
         const ncf = await getNextNcfNumber(companyId, traditionalPrefix);
         await prisma.invoice.update({
@@ -1801,12 +1819,21 @@ export async function getRefundsReport(req: AuthRequest, res: Response) {
   const { start_date, end_date, payment_condition, payment_status, client_search } = req.query;
 
   try {
+    const docTypeParam = (req.query.document_type as string) || (req.query.type as string) || 'reembolso';
+    const isCoopsemuca = docTypeParam === 'coopsemuca';
+
     const whereClause: any = {
       company_id: req.user.company_id || undefined,
-      OR: [
-        { document_type: 'reembolso' },
-        { invoice_number: { startsWith: 'RB-' } },
-      ],
+      OR: isCoopsemuca
+        ? [
+            { document_type: 'coopsemuca' },
+            { invoice_number: { startsWith: 'CP-' } },
+            { invoice_number: { startsWith: 'COOP-' } },
+          ]
+        : [
+            { document_type: 'reembolso' },
+            { invoice_number: { startsWith: 'RB-' } },
+          ],
       status: { notIn: ['voided', 'anulada'] }
     };
 

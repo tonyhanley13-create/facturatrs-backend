@@ -52,10 +52,16 @@ export function canTransmitInvoice(mode: string, documentType?: string): boolean
 
 export async function getMaxInvoiceNumberFromDb(
   tx: any,
-  companyId: number
+  companyId: number,
+  prefixFilter?: string
 ): Promise<number> {
+  const whereClause: any = { company_id: companyId };
+  if (prefixFilter) {
+    whereClause.invoice_number = { startsWith: prefixFilter };
+  }
+
   const invoices = await tx.invoice.findMany({
-    where: { company_id: companyId },
+    where: whereClause,
     select: { invoice_number: true },
   });
 
@@ -63,6 +69,9 @@ export async function getMaxInvoiceNumberFromDb(
   for (const inv of invoices) {
     if (!inv.invoice_number) continue;
     try {
+      if (!prefixFilter && (inv.invoice_number.startsWith('RB-') || inv.invoice_number.startsWith('CP-') || inv.invoice_number.startsWith('COOP-'))) {
+        continue;
+      }
       const parts = inv.invoice_number.split('-');
       const numPart = parts.length > 1 ? parts[1] : inv.invoice_number.replace(/^\D+/g, '');
       const parsed = parseInt(numPart, 10);
