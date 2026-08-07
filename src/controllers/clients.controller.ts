@@ -14,7 +14,8 @@ export async function createClient(req: AuthRequest, res: Response) {
   }
 
   try {
-    const newClient = await prisma.client.create({
+    const db = (req as any).tenantPrisma || prisma;
+    const newClient = await db.client.create({
       data: {
         user_id: req.user.id,
         company_id: req.user.company_id,
@@ -46,13 +47,15 @@ export async function listClients(req: AuthRequest, res: Response) {
   }
 
   try {
-    const clients = await prisma.client.findMany({
+    const db = (req as any).tenantPrisma || prisma;
+    const clients = await db.client.findMany({
       where: {
         company_id: req.user.company_id || undefined,
       },
+      orderBy: { id: 'desc' },
     });
 
-    const formattedClients = clients.map((c) => ({
+    const formattedClients = clients.map((c: any) => ({
       ...c,
       custom_fields: c.custom_fields ? JSON.parse(c.custom_fields) : null,
     }));
@@ -76,7 +79,8 @@ export async function getClient(req: AuthRequest, res: Response) {
   }
 
   try {
-    const client = await prisma.client.findFirst({
+    const db = (req as any).tenantPrisma || prisma;
+    const client = await db.client.findFirst({
       where: {
         id: clientId,
         company_id: req.user.company_id || undefined,
@@ -110,8 +114,8 @@ export async function updateClient(req: AuthRequest, res: Response) {
   const { name, rnc, phone, address, contact_person, email, client_type, tax_id, custom_fields } = req.body;
 
   try {
-    // Verificar si el cliente existe y pertenece a la empresa
-    const client = await prisma.client.findFirst({
+    const db = (req as any).tenantPrisma || prisma;
+    const client = await db.client.findFirst({
       where: {
         id: clientId,
         company_id: req.user.company_id || undefined,
@@ -122,7 +126,7 @@ export async function updateClient(req: AuthRequest, res: Response) {
       return res.status(404).json({ detail: 'Cliente no encontrado' });
     }
 
-    const updatedClient = await prisma.client.update({
+    const updatedClient = await db.client.update({
       where: { id: clientId },
       data: {
         name: name !== undefined ? name : client.name,
@@ -158,7 +162,8 @@ export async function deleteClient(req: AuthRequest, res: Response) {
   }
 
   try {
-    const client = await prisma.client.findFirst({
+    const db = (req as any).tenantPrisma || prisma;
+    const client = await db.client.findFirst({
       where: {
         id: clientId,
         company_id: req.user.company_id || undefined,
@@ -169,7 +174,7 @@ export async function deleteClient(req: AuthRequest, res: Response) {
       return res.status(404).json({ detail: 'Cliente no encontrado' });
     }
 
-    await prisma.client.delete({
+    await db.client.delete({
       where: { id: clientId },
     });
 

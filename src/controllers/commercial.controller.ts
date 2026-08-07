@@ -855,7 +855,8 @@ export async function getInvoices(req: AuthRequest, res: Response) {
   }
 
   try {
-    const invoices = await prisma.invoice.findMany({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoices = await db.invoice.findMany({
       where: whereCondition,
       include: {
         client: true,
@@ -1017,6 +1018,20 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
     }
     const invoiceNumber = await generateInvoiceNumber(userId, companyId, document_type);
 
+    const isReembolso = document_type === 'reembolso';
+    const isCredito = parsedCustomFields.facturado_a_credito === true;
+    let initialPaymentStatus = req.body.payment_status;
+    if (!initialPaymentStatus) {
+      initialPaymentStatus = isCredito ? 'pending' : 'paid';
+    }
+    if (initialPaymentStatus === 'paid') {
+      parsedCustomFields.paid_amount = calculatedTotal;
+      parsedCustomFields.pending_amount = 0;
+    } else if (initialPaymentStatus === 'pending') {
+      parsedCustomFields.paid_amount = parsedCustomFields.paid_amount || 0;
+      parsedCustomFields.pending_amount = Math.max(0, calculatedTotal - Number(parsedCustomFields.paid_amount || 0));
+    }
+
     // Crear factura e items en una sola transacción
     const newInvoice = await prisma.$transaction(async (tx: any) => {
       const inv = await tx.invoice.create({
@@ -1033,11 +1048,12 @@ export async function createInvoiceWithItems(req: AuthRequest, res: Response) {
           total_amount: new Decimal(calculatedTotal),
           currency: currency || 'DOP',
           status: 'draft',
+          payment_status: initialPaymentStatus,
           due_date: due_date ? new Date(due_date) : undefined,
           notes,
           document_type: document_type || null,
           reference_ncf: effectiveReferenceNcf,
-          custom_fields: custom_fields ? JSON.stringify(custom_fields) : null,
+          custom_fields: JSON.stringify(parsedCustomFields),
         },
       });
 
@@ -1108,7 +1124,8 @@ export async function getDashboardData(req: AuthRequest, res: Response) {
     }
 
     // Consultar facturas del periodo
-    const invoices = await prisma.invoice.findMany({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoices = await db.invoice.findMany({
       where: {
         company_id: req.user.company_id || undefined,
         created_at: { gte: startDate },
@@ -1215,7 +1232,8 @@ export async function exportSalesReportToExcel(req: AuthRequest, res: Response) 
     const start = new Date(String(start_date));
     const end = new Date(String(end_date));
 
-    const invoices = await prisma.invoice.findMany({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoices = await db.invoice.findMany({
       where: {
         company_id: req.user.company_id || undefined,
         created_at: {
@@ -1382,7 +1400,8 @@ export async function getDetailedSalesReport(req: AuthRequest, res: Response) {
       ? null
       : await prisma.company.findUnique({ where: { id: req.user.company_id } });
 
-    const invoices = await prisma.invoice.findMany({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoices = await db.invoice.findMany({
       where: {
         company_id: req.user.company_id || undefined,
         created_at: { gte: start, lte: end },
@@ -1631,7 +1650,8 @@ export async function getCxcReport(req: AuthRequest, res: Response) {
   }
 
   try {
-    const invoices = await prisma.invoice.findMany({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoices = await db.invoice.findMany({
       where: {
         company_id: req.user.company_id || undefined,
         payment_status: { in: ['pending', 'partially_paid'] }
@@ -1773,6 +1793,141 @@ export async function getCxcReport(req: AuthRequest, res: Response) {
   }
 }
 
+export async function getRefundsReport(req: AuthRequest, res: Response) {
+  if (!req.user) {
+    return res.status(401).json({ detail: 'No autorizado' });
+  }
+
+  const { start_date, end_date, payment_condition, payment_status, client_search } = req.query;
+
+  try {
+    const whereClause: any = {
+      company_id: req.user.company_id || undefined,
+      OR: [
+        { document_type: 'reembolso' },
+        { invoice_number: { startsWith: 'RB-' } },
+      ],
+      status: { notIn: ['voided', 'anulada'] }
+    };
+
+    if (start_date && end_date) {
+      whereClause.created_at = {
+        gte: new Date(String(start_date)),
+        lte: new Date(String(end_date)),
+      };
+    }
+
+    const db = (req as any).tenantPrisma || prisma;
+    const invoices = await db.invoice.findMany({
+      where: whereClause,
+      include: {
+        client: { select: { id: true, name: true, rnc: true } },
+        items: true,
+      },
+      orderBy: { id: 'desc' }
+    });
+
+    let filteredInvoices = invoices;
+
+    if (payment_condition && payment_condition !== 'all' && payment_condition !== 'Todos') {
+      const wantCredito = String(payment_condition).toLowerCase() === 'credito';
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        try {
+          const custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {};
+          const isCred = custom.facturado_a_credito === true || inv.payment_status === 'pending';
+          return isCred === wantCredito;
+        } catch (_) {
+          return false;
+        }
+      });
+    }
+
+    if (payment_status && payment_status !== 'all' && payment_status !== 'Todos') {
+      const targetStatus = String(payment_status).toLowerCase();
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        return (inv.payment_status || 'pending').toLowerCase() === targetStatus;
+      });
+    }
+
+    if (client_search) {
+      const searchStr = String(client_search).trim().toLowerCase();
+      filteredInvoices = filteredInvoices.filter((inv: any) => {
+        const name = (inv.client?.name || '').toLowerCase();
+        const rnc = (inv.client?.rnc || '').toLowerCase();
+        const invNum = (inv.invoice_number || '').toLowerCase();
+        const desc = (inv.description || '').toLowerCase();
+        return name.includes(searchStr) || rnc.includes(searchStr) || invNum.includes(searchStr) || desc.includes(searchStr);
+      });
+    }
+
+    let totalCount = 0;
+    let totalAmount = 0;
+    let contadoCount = 0;
+    let contadoAmount = 0;
+    let creditoCount = 0;
+    let creditoAmount = 0;
+    let totalPaid = 0;
+    let totalPending = 0;
+
+    const detailedInvoices = filteredInvoices.map((inv: any) => {
+      let custom: any = {};
+      try { custom = inv.custom_fields ? JSON.parse(inv.custom_fields) : {}; } catch (_) {}
+
+      const total = Number(inv.total_amount || 0);
+      const isCredito = custom.facturado_a_credito === true || inv.payment_status === 'pending';
+      const paid = Number(custom.paid_amount || (inv.payment_status === 'paid' ? total : 0));
+      const pending = Math.max(0, total - paid);
+
+      totalCount++;
+      totalAmount += total;
+      totalPaid += paid;
+      totalPending += pending;
+
+      if (isCredito) {
+        creditoCount++;
+        creditoAmount += total;
+      } else {
+        contadoCount++;
+        contadoAmount += total;
+      }
+
+      return {
+        id: inv.id,
+        invoice_number: inv.invoice_number,
+        description: inv.description,
+        client_id: inv.client?.id || inv.client_id,
+        client_name: inv.client?.name || 'Sin Cliente',
+        client_rnc: inv.client?.rnc || '',
+        created_at: inv.created_at ? inv.created_at.toISOString() : null,
+        due_date: inv.due_date ? inv.due_date.toISOString() : null,
+        is_credit: isCredito,
+        payment_status: inv.payment_status,
+        total_amount: total,
+        paid_amount: paid,
+        pending_amount: pending,
+        reference_ncf: inv.reference_ncf || custom.reference_ncf || custom.ncf_comprobante || '',
+      };
+    });
+
+    return res.status(200).json({
+      summary: {
+        total_count: totalCount,
+        total_amount: totalAmount,
+        contado_count: contadoCount,
+        contado_amount: contadoAmount,
+        credito_count: creditoCount,
+        credito_amount: creditoAmount,
+        total_paid: totalPaid,
+        total_pending: totalPending,
+      },
+      invoices: detailedInvoices,
+    });
+  } catch (error: any) {
+    console.error('❌ Error al obtener reporte de reembolsos:', error);
+    return res.status(500).json({ detail: error.message });
+  }
+}
+
 export async function registerInvoicePayment(req: AuthRequest, res: Response) {
   if (!req.user) {
     return res.status(401).json({ detail: 'No autorizado' });
@@ -1784,7 +1939,8 @@ export async function registerInvoicePayment(req: AuthRequest, res: Response) {
   }
 
   try {
-    const invoice = await prisma.invoice.findFirst({
+    const db = (req as any).tenantPrisma || prisma;
+    const invoice = await db.invoice.findFirst({
       where: {
         id: invoiceId,
         company_id: req.user.company_id || undefined,
@@ -1895,8 +2051,9 @@ export async function registerClientAccountAbono(req: AuthRequest, res: Response
   }
 
   try {
+    const db = (req as any).tenantPrisma || prisma;
     // Fetch all unpaid / partially paid invoices for this client (excluding voided/draft)
-    const invoices = await prisma.invoice.findMany({
+    const invoices = await db.invoice.findMany({
       where: {
         client_id: clientId,
         company_id: req.user.company_id || undefined,

@@ -17,6 +17,7 @@ import {
   getDetailedSalesReport,
   exportSalesReportToExcel,
   getCxcReport,
+  getRefundsReport,
   registerInvoicePayment,
   registerClientAccountAbono,
 } from '../controllers/commercial.controller';
@@ -47,5 +48,6 @@ router.get('/reports/sales', authenticateToken, getSalesReport);
 router.get('/reports/sales/detailed', authenticateToken, getDetailedSalesReport);
 router.get('/reports/sales/excel', authenticateToken, exportSalesReportToExcel);
 router.get('/reports/cxc', authenticateToken, getCxcReport);
+router.get('/reports/refunds', authenticateToken, getRefundsReport);
 
 export default router;
